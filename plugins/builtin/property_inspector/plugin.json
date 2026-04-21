@@ -1,0 +1,25 @@
+{
+  "schema": "nexus.plugin_manifest.v1",
+  "plugin_id": "property_inspector",
+  "display_name": "Property Inspector",
+  "version": "1.0.0",
+  "type": "view",
+  "source": "builtin",
+  "module": "nexus_workspace.plugins.property_inspector.plugin",
+  "class": "PropertyInspectorPlugin",
+  "enabled": true,
+  "min_nexus_version": "1.0.0",
+  "provider": {
+    "name": "Nexus",
+    "id": "nexus"
+  },
+  "distribution": {
+    "channel": "builtin",
+    "source": "bundled",
+    "trust": "platform"
+  },
+  "ownership": {
+    "class": "platform"
+  },
+  "display_category": "Built-in"
+}

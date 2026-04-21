@@ -1,0 +1,25 @@
+{
+  "schema": "nexus.plugin_manifest.v1",
+  "plugin_id": "data_inspector",
+  "display_name": "Platform Diagnostics",
+  "version": "1.1.0",
+  "type": "view",
+  "source": "builtin",
+  "module": "nexus_workspace.plugins.data_inspector.plugin",
+  "class": "DataInspectorPlugin",
+  "enabled": true,
+  "min_nexus_version": "1.0.0",
+  "provider": {
+    "name": "Nexus",
+    "id": "nexus"
+  },
+  "distribution": {
+    "channel": "builtin",
+    "source": "bundled",
+    "trust": "platform"
+  },
+  "ownership": {
+    "class": "platform"
+  },
+  "display_category": "Built-in"
+}
