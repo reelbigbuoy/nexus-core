@@ -1,0 +1,73 @@
+{
+  "type_id": "operation.operator",
+  "name": "Operator",
+  "category": "Operation",
+  "description": "Applies a generic unary or binary operator to input values.",
+  "inputs": [
+    {
+      "id": "left",
+      "name": "Left",
+      "direction": "input",
+      "data_type": "any",
+      "connection_kind": "data"
+    },
+    {
+      "id": "right",
+      "name": "Right",
+      "direction": "input",
+      "data_type": "any",
+      "connection_kind": "data"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "result",
+      "name": "Result",
+      "direction": "output",
+      "data_type": "any",
+      "connection_kind": "data"
+    }
+  ],
+  "properties": [
+    {
+      "name": "operator",
+      "label": "Operator",
+      "property_type": "choice",
+      "default": "+",
+      "options": [
+        "+",
+        "-",
+        "*",
+        "/",
+        "%",
+        "==",
+        "!=",
+        ">",
+        ">=",
+        "<",
+        "<=",
+        "and",
+        "or",
+        "not"
+      ]
+    }
+  ],
+  "defaults": {
+    "operator": "+"
+  },
+  "tags": [
+    "expression",
+    "math",
+    "compare"
+  ],
+  "metadata": {
+    "domain": "programming",
+    "semantic_kind": "operator",
+    "ir_kind": "operator",
+    "supported_targets": [
+      "python",
+      "cpp",
+      "java"
+    ]
+  }
+}

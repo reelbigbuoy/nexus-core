@@ -1,0 +1,45 @@
+{
+  "type_id": "test_entry_node",
+  "name": "Sequence",
+  "category": "Flow",
+  "description": "Sequence of events",
+  "inputs": [
+    {
+      "id": "exec",
+      "name": "Exec",
+      "direction": "input",
+      "data_type": "any",
+      "connection_kind": "exec",
+      "multi_connection": false,
+      "required": false
+    },
+    {
+      "id": "data_1",
+      "name": "Data 1",
+      "direction": "input",
+      "data_type": "any",
+      "connection_kind": "data",
+      "multi_connection": false,
+      "required": false
+    }
+  ],
+  "outputs": [
+    {
+      "id": "out",
+      "name": "Out",
+      "direction": "output",
+      "data_type": "exec",
+      "connection_kind": "exec",
+      "multi_connection": false,
+      "required": false
+    }
+  ],
+  "properties": [],
+  "defaults": {},
+  "metadata": {
+    "generated_by": "NoDEViewBuilder"
+  },
+  "visual": {
+    "compact": false
+  }
+}

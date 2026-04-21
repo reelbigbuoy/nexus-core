@@ -1,0 +1,55 @@
+{
+  "type_id": "function.define",
+  "name": "Define Function",
+  "category": "Function",
+  "description": "Declares a reusable function boundary.",
+  "inputs": [],
+  "outputs": [
+    {
+      "id": "body",
+      "name": "Body",
+      "direction": "output",
+      "data_type": "exec",
+      "connection_kind": "exec"
+    },
+    {
+      "id": "return_value",
+      "name": "Return Value",
+      "direction": "output",
+      "data_type": "any",
+      "connection_kind": "data"
+    }
+  ],
+  "properties": [
+    {
+      "name": "name",
+      "label": "Name",
+      "property_type": "string",
+      "default": "my_function"
+    },
+    {
+      "name": "return_type",
+      "label": "Return Type",
+      "property_type": "string",
+      "default": "void"
+    }
+  ],
+  "defaults": {
+    "name": "my_function",
+    "return_type": "void"
+  },
+  "tags": [
+    "function",
+    "definition"
+  ],
+  "metadata": {
+    "domain": "programming",
+    "semantic_kind": "function_define",
+    "ir_kind": "function_definition",
+    "supported_targets": [
+      "python",
+      "cpp",
+      "java"
+    ]
+  }
+}

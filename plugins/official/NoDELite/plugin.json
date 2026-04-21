@@ -1,0 +1,26 @@
+{
+  "schema": "nexus.plugin_manifest.v1",
+  "plugin_id": "NoDELite",
+  "display_name": "NoDE Lite",
+  "version": "1.0.0",
+  "type": "tool",
+  "source": "official",
+  "module": "node_plugin.plugin",
+  "class": "NoDELitePlugin",
+  "import_root": ".",
+  "enabled": true,
+  "min_nexus_version": "1.0.0",
+  "provider": {
+    "name": "Reel Big Buoy Company",
+    "id": "reelbigbuoy"
+  },
+  "distribution": {
+    "channel": "official",
+    "source": "official",
+    "trust": "first_party"
+  },
+  "ownership": {
+    "class": "first_party"
+  },
+  "display_category": "Official"
+}

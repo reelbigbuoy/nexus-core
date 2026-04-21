@@ -1,0 +1,28 @@
+{
+  "type_id": "test_entry_node_2",
+  "name": "Test Entry",
+  "category": "Flow",
+  "description": "",
+  "inputs": [],
+  "outputs": [
+    {
+      "id": "out",
+      "name": "Out",
+      "direction": "output",
+      "data_type": "exec",
+      "connection_kind": "exec",
+      "multi_connection": false,
+      "required": false
+    }
+  ],
+  "properties": [],
+  "defaults": {},
+  "metadata": {
+    "generated_by": "NoDEViewBuilder",
+    "node_kind": "execution",
+    "node_data_type": ""
+  },
+  "visual": {
+    "compact": false
+  }
+}
