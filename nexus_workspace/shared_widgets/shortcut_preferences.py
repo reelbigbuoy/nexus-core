@@ -20,7 +20,7 @@
 # Description: Provides the shortcut preferences dialog for viewing and editing key bindings.
 #============================================================================
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 from ..framework.controls import NexusTableWidget
 from ..framework.forms import NexusForm, NexusInspectorSection, NexusSearchBar

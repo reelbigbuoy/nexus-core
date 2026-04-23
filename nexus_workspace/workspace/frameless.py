@@ -20,7 +20,7 @@
 # Description: Provides frameless window behavior and custom drag-resize handling.
 #============================================================================
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 
 class FrameInteractionEventFilter(QtCore.QObject):

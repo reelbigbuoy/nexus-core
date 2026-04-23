@@ -152,19 +152,36 @@ def run_startup_validation(project_root: Path) -> ValidationReport:
         if len(owners) > 1:
             report.add('warning', f'Duplicate command contribution id: {command_id}', ', '.join(sorted(owners)))
 
-    framework_roots = {'nexus_workspace/framework', 'nexus_workspace/workspace', 'nexus_workspace/core', 'nexus_workspace/runtime'}
-    qt_import_count = 0
+    framework_roots = {'nexus_workspace/framework'}
+    direct_qt_imports = []
+    framework_qt_bridge_count = 0
     for py_path in sorted(project_root.rglob('*.py')):
         relative = py_path.relative_to(project_root).as_posix()
-        if relative.startswith('.git/'):
+        if relative.startswith('.git/') or relative == 'nexus_workspace/runtime/dev_validation.py':
             continue
         try:
             source = py_path.read_text(encoding='utf-8')
         except Exception:
             continue
-        if 'from PyQt5' in source or 'import PyQt5' in source:
-            if not any(relative.startswith(prefix) for prefix in framework_roots):
-                qt_import_count += 1
-    report.add('info', 'Direct Qt import count outside framework/core/workspace/runtime', str(qt_import_count))
+        has_direct_qt_import = any(token in source for token in (
+            'from PyQt5',
+            'import PyQt5',
+            'from PySide6',
+            'import PySide6',
+        ))
+        if has_direct_qt_import and not any(relative.startswith(prefix) for prefix in framework_roots):
+            direct_qt_imports.append(relative)
+        if 'from nexus_workspace.framework.qt import' in source or 'import nexus_workspace.framework.qt' in source:
+            framework_qt_bridge_count += 1
+
+    if direct_qt_imports:
+        report.add(
+            'warning',
+            'Direct Qt imports detected outside nexus framework',
+            '\n'.join(direct_qt_imports),
+        )
+    else:
+        report.add('info', 'Direct Qt imports outside nexus framework', '0')
+    report.add('info', 'Framework Qt bridge imports', str(framework_qt_bridge_count))
 
     return report

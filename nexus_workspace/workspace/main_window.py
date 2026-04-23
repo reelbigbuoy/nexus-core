@@ -22,7 +22,7 @@
 
 from pathlib import Path
 
-from PyQt5 import QtCore, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtWidgets
 
 from ..core import ActionDispatcher, CommandService, ContextResolver, DataStore, EventBus, PluginContext, SessionManager, StateManager, build_state_taxonomy
 from ..plugins.manager import PluginManager

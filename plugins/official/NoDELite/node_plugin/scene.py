@@ -10,7 +10,7 @@
 # ============================================================================
 
 import math
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from nexus_workspace.core.themes import THEMES
 from .constants import GRID_SIZE
 from .definitions import TestNodeData, node_definition_for_type, create_node_entry

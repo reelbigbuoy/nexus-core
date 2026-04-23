@@ -9,7 +9,7 @@
 # See the LICENSE file in the NoDE repository root for license terms.
 # ============================================================================
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from .constants import ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, FIT_PADDING
 from .definitions import NODE_REGISTRY, NodeDefinitionRegistry
 from .graphics_items import NodeItem, ConnectionItem, PortItem, ConnectionPinItem, _distance_to_segment

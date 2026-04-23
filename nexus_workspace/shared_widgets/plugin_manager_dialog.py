@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 from ..framework.windowing import NexusDialogBase
 from ..framework.controls import NexusTableWidget

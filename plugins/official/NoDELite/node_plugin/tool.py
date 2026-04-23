@@ -11,7 +11,7 @@
 
 import json
 import os
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from nexus_workspace.core.serialization import NexusSerializable
 from nexus_workspace.core.themes import build_stylesheet, get_theme_colors
 from nexus_workspace.core.selection_contract import SELECTION_CURRENT_CONTRACT, SelectionPublisher

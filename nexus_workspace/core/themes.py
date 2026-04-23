@@ -25,7 +25,7 @@ from __future__ import absolute_import
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from PyQt5 import QtCore
+from nexus_workspace.framework.qt import QtCore
 
 
 NODE_WIDTH = 180

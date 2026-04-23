@@ -24,7 +24,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from PyQt5 import QtCore
+from nexus_workspace.framework.qt import QtCore
 
 from .serialization import NexusSerializable
 from .state_contract import build_plugin_tool_state, build_workspace_window_state, normalize_persisted_state

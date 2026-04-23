@@ -20,7 +20,7 @@
 # Description: Implements the command palette dialog and related command search behavior.
 #============================================================================
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 from ..framework.actions import NexusCommandBar, NexusCommandList, NexusCommandRegistry
 from ..framework.windowing import NexusDialogBase, NexusMessageDialog

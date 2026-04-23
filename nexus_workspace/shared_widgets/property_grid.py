@@ -23,7 +23,7 @@
 import json
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from PyQt5 import QtCore, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtWidgets
 
 from ..core.selection_contract import normalize_selection_payload
 from ..core.inspectable_contract import normalize_inspectable_object

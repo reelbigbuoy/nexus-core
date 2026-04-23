@@ -9,7 +9,7 @@
 # See the LICENSE file in the NoDE repository root for license terms.
 # ============================================================================
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from nexus_workspace.core.themes import THEMES
 from .constants import NODE_WIDTH, TITLE_HEIGHT, PORT_RADIUS, PORT_SPACING, NODE_CORNER_RADIUS, GRID_SIZE
 from .definitions import TestNodeData, node_definition_for_type

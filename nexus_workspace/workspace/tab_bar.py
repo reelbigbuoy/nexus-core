@@ -20,7 +20,7 @@
 # Description: Provides the customized tab bar used by workspace panes.
 #============================================================================
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 
 class _VisibleCloseButton(QtWidgets.QToolButton):

@@ -22,7 +22,7 @@
 
 from dataclasses import dataclass
 from typing import Callable
-from PyQt5 import QtCore, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtWidgets
 
 from ..core.plugin_contract import build_plugin_manifest
 

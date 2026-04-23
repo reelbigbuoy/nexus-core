@@ -20,7 +20,7 @@
 # Description: Manages session-scoped state and runtime data for the active application session.
 #============================================================================
 
-from PyQt5 import QtWidgets
+from nexus_workspace.framework.qt import QtWidgets
 
 
 class SessionManager:

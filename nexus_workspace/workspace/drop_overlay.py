@@ -20,7 +20,7 @@
 # Description: Implements drop target overlays used during pane docking and workspace rearrangement.
 #============================================================================
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 
 def _clamp(value, minimum, maximum):

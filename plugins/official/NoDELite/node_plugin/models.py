@@ -9,7 +9,8 @@
 # See the LICENSE file in the NoDE repository root for license terms.
 # ============================================================================
 
-from PyQt5.QtCore import QPointF
+from nexus_workspace.framework.qt import QtCore
+QPointF = QtCore.QPointF
 
 
 class GraphConnectionData:

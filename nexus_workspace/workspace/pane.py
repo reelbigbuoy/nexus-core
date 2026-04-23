@@ -20,7 +20,7 @@
 # Description: Implements the workspace pane widget that hosts tabbed tools and pane controls.
 #============================================================================
 
-from PyQt5 import QtCore, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtWidgets
 
 from .drop_overlay import WorkspaceDropOverlay, build_drop_regions
 from .tab_bar import WorkspaceTabBar

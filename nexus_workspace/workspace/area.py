@@ -20,7 +20,7 @@
 # Description: Defines the workspace area widget that hosts rendered panes and docking layouts.
 #============================================================================
 
-from PyQt5 import QtCore, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtWidgets
 
 from ..plugins.base import reset_tool_theme
 from .pane import WorkspacePane

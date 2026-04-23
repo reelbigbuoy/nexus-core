@@ -22,7 +22,7 @@
 
 import sys
 from pathlib import Path
-from PyQt5 import QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtGui, QtWidgets
 from nexus_workspace.runtime.dev_validation import run_startup_validation
 
 

@@ -20,7 +20,7 @@
 # Description: Renders workspace layout models into live pane, tab, and splitter widgets.
 #============================================================================
 
-from PyQt5 import QtCore, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtWidgets
 
 from .layout_model import PaneNode, SplitNode
 from .pane import WorkspacePane

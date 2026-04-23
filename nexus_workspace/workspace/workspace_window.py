@@ -25,7 +25,7 @@ import json
 import uuid
 from pathlib import Path
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 from ..core.themes import build_stylesheet, get_theme_colors, get_theme_manager
 from ..framework.actions import NexusCommandMenuBuilder, NexusCommandRegistry

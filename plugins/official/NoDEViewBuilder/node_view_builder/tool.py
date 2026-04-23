@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 
 COMMON_DATA_TYPES = [

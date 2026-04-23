@@ -9,7 +9,7 @@
 # See the LICENSE file in the NoDE repository root for license terms.
 # ============================================================================
 
-from PyQt5 import QtCore, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtWidgets
 from .definitions import node_definition_for_type, create_node_entry
 from .models import GraphConnectionData
 
