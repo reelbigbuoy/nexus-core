@@ -97,6 +97,20 @@ class PluginManager:
             }
             self._publish_registry_snapshot()
 
+    def unregister_plugin(self, plugin_id: str):
+        """Remove a plugin and its tool descriptors from the live registry."""
+        plugin_id = str(plugin_id or '').strip()
+        if not plugin_id:
+            return
+        self._plugins = [plugin for plugin in self._plugins if getattr(plugin, 'plugin_id', '') != plugin_id]
+        self._plugins_by_id.pop(plugin_id, None)
+        for tool_type_id, descriptor in list(self._tool_descriptors.items()):
+            if getattr(descriptor, 'plugin_id', '') == plugin_id or tool_type_id == plugin_id:
+                self._tool_descriptors.pop(tool_type_id, None)
+        self._plugin_manifests.pop(plugin_id, None)
+        self._plugin_records.pop(plugin_id, None)
+        self._publish_registry_snapshot()
+
     def register_tool(self, descriptor: ToolDescriptor):
         if descriptor.plugin_id == '':
             descriptor.plugin_id = getattr(self._plugins[-1], 'plugin_id', '') if self._plugins else ''

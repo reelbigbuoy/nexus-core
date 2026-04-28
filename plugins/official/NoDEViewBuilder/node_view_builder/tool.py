@@ -195,6 +195,15 @@ class NoDEViewBuilderTool(QtWidgets.QWidget):
         self.targetLabel.setWordWrap(True)
         self.targetLabel.setText(self._target_label_text())
         target_layout.addWidget(self.targetLabel)
+        target_actions = QtWidgets.QHBoxLayout()
+        self.btnValidateAll = QtWidgets.QPushButton('Validate View Pack')
+        self.btnReloadDisk = QtWidgets.QPushButton('Reload From Disk')
+        self.btnValidateAll.clicked.connect(self._validate_view_pack)
+        self.btnReloadDisk.clicked.connect(lambda: self._load_from_disk(select_first=False))
+        target_actions.addWidget(self.btnValidateAll)
+        target_actions.addWidget(self.btnReloadDisk)
+        target_actions.addStretch(1)
+        target_layout.addLayout(target_actions)
         root.addWidget(target_group)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -513,7 +522,7 @@ class NoDEViewBuilderTool(QtWidgets.QWidget):
             category = str(node.get('category', ''))
             metadata = dict(node.get('metadata', {}) or {})
             node_kind = str(metadata.get('node_kind', 'execution') or 'execution').strip().lower()
-            if node_kind not in ('execution', 'data'):
+            if node_kind not in ('execution', 'data', 'graph'):
                 node_kind = 'execution'
             node_data_type = str(metadata.get('node_data_type', '') or '').strip()
             self.nodeKindCombo.setCurrentText(node_kind)
@@ -564,11 +573,11 @@ class NoDEViewBuilderTool(QtWidgets.QWidget):
                 return
             for row in range(self.portTable.rowCount()):
                 kind_widget = self.portTable.cellWidget(row, 2)
-                data_type_item = self.portTable.item(row, 3)
+                data_type_widget = self.portTable.cellWidget(row, 3)
                 if kind_widget is not None and kind_widget.currentText().strip().lower() != 'data':
                     kind_widget.setCurrentText('data')
-                if data_type_item is not None and not data_type_item.text().strip():
-                    data_type_item.setText(node_data_type)
+                if data_type_widget is not None and hasattr(data_type_widget, 'setCurrentText'):
+                    data_type_widget.setCurrentText(node_data_type)
             return
         if node_kind == 'graph':
             if not preserve_existing or self.portTable.rowCount() == 0:
@@ -700,10 +709,15 @@ class NoDEViewBuilderTool(QtWidgets.QWidget):
         new = self._prompt_text('Rename Category', 'Category name', text=old)
         if not new or new == old:
             return
+        existing = {self.categoryList.item(i).text().lower() for i in range(self.categoryList.count()) if self.categoryList.item(i) is not item}
+        if new.lower() in existing:
+            QtWidgets.QMessageBox.warning(self, 'Category Exists', f"'{new}' already exists in this view.")
+            return
         item.setText(new)
         for node in self._nodes_by_type.values():
             if node.get('category') == old and node.get('type_id') in set(self._views_by_id.get(self._current_view_id, {}).get('include_type_ids', [])):
                 node['category'] = new
+                self._write_json(Path(node.get('_source_path', self._defs_dir() / f"{node['type_id']}.json")), node)
         if self.categoryCombo.currentText() == old:
             self.categoryCombo.setCurrentText(new)
         self._refresh_category_combo()
@@ -714,7 +728,9 @@ class NoDEViewBuilderTool(QtWidgets.QWidget):
         if not items:
             return
         category = items[0].text()
-        answer = QtWidgets.QMessageBox.question(self, 'Delete Category', f"Delete category '{category}' from this view? Nodes in that category will remain on disk until you move or delete them.")
+        affected = [n.get('name', n.get('type_id')) for n in self._nodes_by_type.values() if n.get('category') == category and n.get('type_id') in set(self._views_by_id.get(self._current_view_id, {}).get('include_type_ids', []))]
+        detail = f"\n\nThis category currently contains {len(affected)} node(s). They will remain on disk but disappear from this view until moved or the category is re-added." if affected else ''
+        answer = QtWidgets.QMessageBox.question(self, 'Delete Category', f"Delete category '{category}' from this view?{detail}")
         if answer != QtWidgets.QMessageBox.Yes:
             return
         row = self.categoryList.row(items[0])
@@ -788,6 +804,9 @@ class NoDEViewBuilderTool(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, 'Missing Name', 'View name is required.')
             return
         categories = [self.categoryList.item(i).text().strip() for i in range(self.categoryList.count()) if self.categoryList.item(i).text().strip()]
+        if len({c.lower() for c in categories}) != len(categories):
+            QtWidgets.QMessageBox.warning(self, 'Duplicate Categories', 'Category names must be unique within a view.')
+            return
         view['name'] = name
         view['description'] = self.viewDescEdit.text().strip()
         view['include_categories'] = categories
@@ -818,6 +837,10 @@ class NoDEViewBuilderTool(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, 'Missing Category', 'Choose a category for the node.')
             return
         ports = self.portTable.port_entries()
+        port_ids = [p.get('id') for p in ports]
+        if len(set(port_ids)) != len(port_ids):
+            QtWidgets.QMessageBox.warning(self, 'Duplicate Ports', 'Port names must be unique on a node.')
+            return
         node_kind = self.nodeKindCombo.currentText().strip().lower() or 'execution'
         node_data_type = self.nodeDataTypeEdit.currentText().strip() or 'any'
         if node_kind == 'data':
@@ -895,6 +918,41 @@ class NoDEViewBuilderTool(QtWidgets.QWidget):
         self.nodePreview.refresh(title, inputs, outputs)
         self._refresh_node_list_labels()
 
+
+
+    def _validate_view_pack(self):
+        issues = []
+        for view in self._views_by_id.values():
+            vid = view.get('view_id', '<missing>')
+            if not view.get('name'):
+                issues.append(f'View {vid}: missing name')
+            categories = [str(c) for c in view.get('include_categories', []) or []]
+            if len({c.lower() for c in categories}) != len(categories):
+                issues.append(f'View {vid}: duplicate category names')
+            for type_id in view.get('include_type_ids', []) or []:
+                if type_id not in self._nodes_by_type:
+                    issues.append(f'View {vid}: missing node definition {type_id}')
+        for node in self._nodes_by_type.values():
+            tid = node.get('type_id', '<missing>')
+            if not node.get('name'):
+                issues.append(f'Node {tid}: missing name')
+            if not node.get('category'):
+                issues.append(f'Node {tid}: missing category')
+            all_ports = list(node.get('inputs', []) or []) + list(node.get('outputs', []) or [])
+            ids = [p.get('id') for p in all_ports]
+            if len(set(ids)) != len(ids):
+                issues.append(f'Node {tid}: duplicate port IDs')
+            kind = str((node.get('metadata') or {}).get('node_kind', 'execution')).lower()
+            if kind == 'graph' and not (node.get('metadata') or {}).get('owned_graph_path'):
+                issues.append(f'Node {tid}: graph node has no owned graph path')
+        if issues:
+            self._log('Validation found issues:')
+            for issue in issues:
+                self._log(f'  - {issue}')
+            QtWidgets.QMessageBox.warning(self, 'Validation Issues', '\n'.join(issues[:12]) + ('\n...' if len(issues) > 12 else ''))
+        else:
+            self._log('Validation passed: view pack is internally consistent.')
+            QtWidgets.QMessageBox.information(self, 'Validation Passed', 'View pack is internally consistent.')
 
     def _next_draft_node_id(self) -> str:
         existing = {self.nodeList.item(i).data(QtCore.Qt.UserRole) for i in range(self.nodeList.count())}

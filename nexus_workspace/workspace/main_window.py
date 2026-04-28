@@ -88,6 +88,31 @@ class WorkspaceMainWindow(WorkspaceWindow):
         QtCore.QTimer.singleShot(0, self._refresh_restored_theme)
         self.refresh_window_title()
 
+    def reload_plugin_from_path(self, plugin_root):
+        """Hot-load a plugin directory and refresh all workspace menus."""
+        if self.plugin_loader is None:
+            return None
+        record = self.plugin_loader.reload_plugin_at(Path(plugin_root))
+        for window in list(getattr(self.workspace_manager, '_windows', []) or []):
+            for name in ('_rebuild_file_menu', '_rebuild_view_menu', '_rebuild_tools_menu'):
+                callback = getattr(window, name, None)
+                if callback is not None:
+                    try:
+                        callback()
+                    except Exception:
+                        pass
+            refresh_commands = getattr(window, 'refresh_command_bindings', None)
+            if refresh_commands is not None:
+                try:
+                    refresh_commands()
+                except Exception:
+                    pass
+        try:
+            self.statusbar.showMessage(f'Plugin reloaded: {getattr(record, "display_name", "") or Path(plugin_root).name}', 4000)
+        except Exception:
+            pass
+        return record
+
     def plugin_records(self):
         if self.plugin_loader is None:
             return []

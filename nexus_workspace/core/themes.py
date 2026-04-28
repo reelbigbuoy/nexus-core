@@ -526,6 +526,50 @@ def build_stylesheet(theme_or_name):
     theme.setdefault('input_border', theme.get('border', '#3A4160'))
     theme.setdefault('selection_bg', theme.get('accent', '#7E57C2'))
     theme.setdefault('selection_text', theme.get('accent_text', theme.get('text_on_accent', '#FFFFFF')))
+
+    # Semantic Nexus UI control tokens. These centralize framework widget styling so
+    # plugins and design previews inherit a consistent look without local styling.
+    panel_bg = theme.get('panel_bg', theme.get('app_bg', '#20242B'))
+    panel_alt_bg = theme.get('panel_alt_bg', theme.get('input_bg', panel_bg))
+    input_bg = theme.get('input_bg', panel_alt_bg)
+    border = theme.get('border', theme.get('input_border', '#3A4160'))
+    border_strong = theme.get('border_strong', border)
+    accent = theme.get('accent', '#3B82F6')
+    theme.setdefault('control_bg', input_bg)
+    theme.setdefault('control_alt_bg', panel_alt_bg)
+    theme.setdefault('control_hover_bg', theme.get('hover_bg', panel_alt_bg))
+    theme.setdefault('control_pressed_bg', theme.get('pressed_bg', panel_alt_bg))
+    theme.setdefault('control_border', border)
+    theme.setdefault('control_border_hover', border_strong)
+    theme.setdefault('control_focus_border', theme.get('focus_ring', accent))
+    theme.setdefault('control_text', theme.get('text', '#FFFFFF'))
+    theme.setdefault('control_disabled_bg', panel_alt_bg)
+    theme.setdefault('control_disabled_text', theme.get('disabled_text', theme.get('muted_text', '#AAB2C0')))
+    theme.setdefault('button_bg', panel_alt_bg)
+    theme.setdefault('button_hover_bg', theme.get('hover_bg', panel_alt_bg))
+    theme.setdefault('button_pressed_bg', theme.get('pressed_bg', panel_alt_bg))
+    theme.setdefault('button_border', border_strong)
+    theme.setdefault('button_hover_border', accent)
+    theme.setdefault('button_pressed_border', theme.get('accent_pressed', accent))
+    theme.setdefault('button_text', theme.get('text', '#FFFFFF'))
+    theme.setdefault('button_disabled_bg', theme.get('control_disabled_bg'))
+    theme.setdefault('button_disabled_text', theme.get('control_disabled_text'))
+    theme.setdefault('primary_button_bg', accent)
+    theme.setdefault('primary_button_hover_bg', theme.get('accent_hover', accent))
+    theme.setdefault('primary_button_pressed_bg', theme.get('accent_pressed', accent))
+    theme.setdefault('primary_button_border', accent)
+    theme.setdefault('primary_button_text', theme.get('accent_text', '#FFFFFF'))
+    theme.setdefault('row_alt_bg', panel_alt_bg)
+    theme.setdefault('row_hover_bg', theme.get('hover_bg', panel_alt_bg))
+    theme.setdefault('frame_bg', theme.get('panel_bg', panel_bg))
+    theme.setdefault('frame_border', theme.get('panel_border', border))
+    theme.setdefault('frame_border_hover', theme.get('border_strong', border_strong))
+    theme.setdefault('frame_radius', 8)
+    theme.setdefault('corner_radius_rounded', theme.get('frame_radius', 8))
+    theme.setdefault('corner_radius_square', 0)
+    theme.setdefault('widget_padding_sm', 4)
+    theme.setdefault('widget_padding_md', 8)
+    theme.setdefault('table_radius', theme.get('frame_radius', 8))
     return """
     QMainWindow, QWidget {{
         background-color: {app_bg};
@@ -616,6 +660,59 @@ def build_stylesheet(theme_or_name):
     #NexusToolbarRow {{
         background-color: {panel_bg};
         border-bottom: 1px solid {border};
+    }}
+
+    QFrame[nexusControl="frame"],
+    QFrame[nexusThemeRole="surface"] {{
+        background-color: transparent;
+        border: none;
+    }}
+
+    QFrame[nexusFrameStyle="bordered"] {{
+        background-color: {frame_bg};
+        border: 1px solid {frame_border};
+        border-radius: {frame_radius}px;
+    }}
+
+    QFrame[nexusFrameStyle="borderless"] {{
+        background-color: transparent;
+        border: none;
+    }}
+
+    QFrame[nexusCorner="square"],
+    QTableWidget[nexusCorner="square"],
+    QTableView[nexusCorner="square"],
+    QLineEdit[nexusCorner="square"],
+    QTextEdit[nexusCorner="square"],
+    QPushButton[nexusCorner="square"] {{
+        border-radius: {corner_radius_square}px;
+    }}
+
+    QFrame[nexusCorner="rounded"],
+    QTableWidget[nexusCorner="rounded"],
+    QTableView[nexusCorner="rounded"],
+    QLineEdit[nexusCorner="rounded"],
+    QTextEdit[nexusCorner="rounded"],
+    QPushButton[nexusCorner="rounded"] {{
+        border-radius: {corner_radius_rounded}px;
+    }}
+
+    QFrame[nexusBorder="none"],
+    QTableWidget[nexusBorder="none"],
+    QTableView[nexusBorder="none"] {{
+        border: none;
+    }}
+
+    QFrame[nexusBorder="strong"],
+    QTableWidget[nexusBorder="strong"],
+    QTableView[nexusBorder="strong"] {{
+        border: 1px solid {border_strong};
+    }}
+
+    #NexusPanel, #NexusSurface {{
+        background-color: {frame_bg};
+        border: 1px solid {frame_border};
+        border-radius: {frame_radius}px;
     }}
 
     QMenuBar {{
@@ -729,13 +826,27 @@ def build_stylesheet(theme_or_name):
     }}
 
     QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
-        background-color: {input_bg};
-        color: {text};
-        border: 1px solid {border};
-        border-radius: 4px;
+        background-color: {control_bg};
+        color: {control_text};
+        border: 1px solid {control_border};
+        border-radius: 6px;
         padding: 4px 6px;
         selection-background-color: {selection_bg};
         selection-color: {selection_text};
+    }}
+
+    QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover {{
+        border-color: {control_border_hover};
+    }}
+
+    QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
+        border-color: {control_focus_border};
+    }}
+
+    QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {{
+        background-color: {control_disabled_bg};
+        color: {control_disabled_text};
+        border-color: {control_border};
     }}
 
     QTextEdit, QPlainTextEdit {{
@@ -744,29 +855,131 @@ def build_stylesheet(theme_or_name):
     }}
 
     QPushButton {{
-        background-color: {panel_bg};
-        color: {text};
-        border: 1px solid {border};
-        border-radius: 4px;
-        padding: 6px 10px;
+        background-color: {button_bg};
+        color: {button_text};
+        border: 1px solid {button_border};
+        border-radius: 6px;
+        padding: 6px 12px;
+        min-height: 18px;
     }}
 
     QPushButton:hover {{
-        border: 1px solid {accent};
-        background-color: {hover_bg};
+        background-color: {button_hover_bg};
+        border-color: {button_hover_border};
+    }}
+
+    QPushButton:pressed {{
+        background-color: {button_pressed_bg};
+        border-color: {button_pressed_border};
+    }}
+
+    QPushButton:focus {{
+        border-color: {control_focus_border};
+    }}
+
+    QPushButton:disabled {{
+        background-color: {button_disabled_bg};
+        color: {button_disabled_text};
+        border-color: {control_border};
+    }}
+
+    QPushButton[nexusVariant="primary"] {{
+        background-color: {primary_button_bg};
+        color: {primary_button_text};
+        border-color: {primary_button_border};
+        font-weight: 600;
+    }}
+
+    QPushButton[nexusVariant="primary"]:hover {{
+        background-color: {primary_button_hover_bg};
+        border-color: {primary_button_hover_bg};
+    }}
+
+    QPushButton[nexusVariant="primary"]:pressed {{
+        background-color: {primary_button_pressed_bg};
+        border-color: {primary_button_pressed_bg};
     }}
 
     QToolButton {{
         background-color: transparent;
         color: {text};
         border: 1px solid transparent;
-        border-radius: 4px;
+        border-radius: 6px;
         padding: 4px 6px;
     }}
 
     QToolButton:hover {{
-        background-color: {hover_bg};
-        border-color: {border};
+        background-color: {button_hover_bg};
+        border-color: {button_border};
+    }}
+
+    QToolButton:pressed {{
+        background-color: {button_pressed_bg};
+        border-color: {button_pressed_border};
+    }}
+
+    QCheckBox, QRadioButton {{
+        color: {control_text};
+        background-color: transparent;
+        spacing: 6px;
+    }}
+
+    QCheckBox::indicator, QRadioButton::indicator {{
+        width: 14px;
+        height: 14px;
+        background-color: {control_bg};
+        border: 1px solid {button_border};
+    }}
+
+    QCheckBox::indicator {{
+        border-radius: 3px;
+    }}
+
+    QRadioButton::indicator {{
+        border-radius: 7px;
+    }}
+
+    QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+        border-color: {button_hover_border};
+        background-color: {button_hover_bg};
+    }}
+
+    QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+        background-color: {primary_button_bg};
+        border-color: {primary_button_bg};
+    }}
+
+    QCheckBox:disabled, QRadioButton:disabled {{
+        color: {control_disabled_text};
+    }}
+
+    QSlider::groove:horizontal {{
+        height: 6px;
+        background: {control_alt_bg};
+        border: 1px solid {control_border};
+        border-radius: 3px;
+    }}
+
+    QSlider::handle:horizontal {{
+        width: 14px;
+        margin: -5px 0;
+        border-radius: 7px;
+        background: {primary_button_bg};
+        border: 1px solid {primary_button_border};
+    }}
+
+    QProgressBar {{
+        background-color: {control_bg};
+        color: {control_text};
+        border: 1px solid {control_border};
+        border-radius: 6px;
+        text-align: center;
+        min-height: 18px;
+    }}
+
+    QProgressBar::chunk {{
+        background-color: {primary_button_bg};
+        border-radius: 5px;
     }}
 
     QToolBar {{
@@ -853,11 +1066,12 @@ def build_stylesheet(theme_or_name):
     }}
 
     QTableWidget, QTableView {{
-        background-color: {input_bg};
-        alternate-background-color: {panel_alt_bg};
+        background-color: {control_bg};
+        alternate-background-color: {row_alt_bg};
         color: {text};
         gridline-color: {table_grid};
         border: 1px solid {border};
+        border-radius: {table_radius}px;
         selection-background-color: {table_selection_bg};
         selection-color: {selection_text};
     }}
@@ -868,8 +1082,8 @@ def build_stylesheet(theme_or_name):
     }}
 
     QListWidget, QListView, QTreeWidget, QTreeView {{
-        background-color: {input_bg};
-        alternate-background-color: {panel_alt_bg};
+        background-color: {control_bg};
+        alternate-background-color: {row_alt_bg};
         color: {text};
         border: 1px solid {border};
         outline: 0;
@@ -897,7 +1111,7 @@ def build_stylesheet(theme_or_name):
     }}
 
     QListWidget::item:hover, QListView::item:hover, QTreeWidget::item:hover, QTreeView::item:hover {{
-        background-color: {panel_alt_bg};
+        background-color: {row_hover_bg};
     }}
 
     QTreeWidget::branch:selected, QTreeView::branch:selected {{

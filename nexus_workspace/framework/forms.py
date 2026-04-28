@@ -24,7 +24,10 @@ from __future__ import annotations
 
 from PyQt5 import QtCore, QtWidgets
 
-from .controls import NexusSection
+from .controls import (
+    NexusButton, NexusCheckBox, NexusComboBox, NexusDoubleSpinBox, NexusLabel,
+    NexusSection, NexusSpinBox, NexusTextEditor, NexusTextInput,
+)
 
 
 class NexusSearchBar(QtWidgets.QWidget):
@@ -34,10 +37,8 @@ class NexusSearchBar(QtWidgets.QWidget):
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        self.searchEdit = QtWidgets.QLineEdit(self)
-        self.searchEdit.setPlaceholderText(placeholder)
-        self.searchEdit.setClearButtonEnabled(True)
-        self.primaryButton = QtWidgets.QPushButton(button_text, self)
+        self.searchEdit = NexusTextInput(parent=self, placeholder=placeholder, clear_button=True)
+        self.primaryButton = NexusButton(button_text, self)
         layout.addWidget(self.searchEdit, 1)
         layout.addWidget(self.primaryButton, 0)
 
@@ -50,7 +51,7 @@ class NexusFieldRow(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(4)
-        self.label = QtWidgets.QLabel(str(label or ''), self)
+        self.label = NexusLabel(str(label or ''), self)
         self.label.setObjectName('NexusFieldLabel')
         self.label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         layout.addWidget(self.label, 0, 0)
@@ -59,9 +60,8 @@ class NexusFieldRow(QtWidgets.QWidget):
         layout.setColumnStretch(1, 1)
         self.helpLabel = None
         if help_text:
-            self.helpLabel = QtWidgets.QLabel(str(help_text), self)
+            self.helpLabel = NexusLabel(str(help_text), self, word_wrap=True)
             self.helpLabel.setObjectName('NexusFieldHelpText')
-            self.helpLabel.setWordWrap(True)
             layout.addWidget(self.helpLabel, 1, 1)
 
 
@@ -96,9 +96,8 @@ class NexusInspectorSection(NexusSection):
         self.body_layout().addWidget(self.form, 1)
         self.helpLabel = None
         if help_text:
-            self.helpLabel = QtWidgets.QLabel(str(help_text), self)
+            self.helpLabel = NexusLabel(str(help_text), self, word_wrap=True)
             self.helpLabel.setObjectName('NexusFieldHelpText')
-            self.helpLabel.setWordWrap(True)
             self.form.layout_widget().insertWidget(0, self.helpLabel)
 
 from ..core.data_model import normalize_data_model
@@ -139,8 +138,7 @@ class NexusDataModelForm(QtWidgets.QScrollArea):
         self.clear_form()
         self._model = model
         if model is None:
-            placeholder = QtWidgets.QLabel('No data model is available for this selection.', self._container)
-            placeholder.setWordWrap(True)
+            placeholder = NexusLabel('No data model is available for this selection.', self._container, word_wrap=True)
             placeholder.setObjectName('NexusFieldHelpText')
             self._layout.insertWidget(0, placeholder)
             return
@@ -178,7 +176,7 @@ class NexusDataModelForm(QtWidgets.QScrollArea):
         multiline = bool(editor_hint.get('multiline', False))
 
         if kind == 'choice':
-            editor = QtWidgets.QComboBox(self._container)
+            editor = NexusComboBox(self._container)
             current_index = -1
             for index, option in enumerate(editor_hint.get('options') or []):
                 option_value = option.get('value') if isinstance(option, dict) else option
@@ -190,11 +188,11 @@ class NexusDataModelForm(QtWidgets.QScrollArea):
                 editor.setCurrentIndex(current_index)
             editor.currentIndexChanged.connect(lambda _idx, e=editor, p=field_path: self.fieldValueEdited.emit(p, e.currentData()))
         elif value_type == 'bool' or kind == 'bool':
-            editor = QtWidgets.QCheckBox(self._container)
+            editor = NexusCheckBox(parent=self._container)
             editor.setChecked(bool(value))
             editor.toggled.connect(lambda checked, p=field_path: self.fieldValueEdited.emit(p, bool(checked)))
         elif value_type == 'int':
-            editor = QtWidgets.QSpinBox(self._container)
+            editor = NexusSpinBox(self._container)
             numeric = editor_hint.get('numeric') if isinstance(editor_hint.get('numeric'), dict) else {}
             editor.setMinimum(int(numeric.get('minimum', -2147483648) or -2147483648))
             editor.setMaximum(int(numeric.get('maximum', 2147483647) or 2147483647))
@@ -202,7 +200,7 @@ class NexusDataModelForm(QtWidgets.QScrollArea):
             editor.setValue(int(value or 0))
             editor.editingFinished.connect(lambda e=editor, p=field_path: self.fieldValueEdited.emit(p, int(e.value())))
         elif value_type == 'float':
-            editor = QtWidgets.QDoubleSpinBox(self._container)
+            editor = NexusDoubleSpinBox(self._container)
             numeric = editor_hint.get('numeric') if isinstance(editor_hint.get('numeric'), dict) else {}
             editor.setDecimals(int(numeric.get('decimals', 3) or 3))
             editor.setMinimum(float(numeric.get('minimum', -999999999.0) or -999999999.0))
@@ -212,12 +210,12 @@ class NexusDataModelForm(QtWidgets.QScrollArea):
             editor.editingFinished.connect(lambda e=editor, p=field_path: self.fieldValueEdited.emit(p, float(e.value())))
         else:
             if multiline:
-                editor = QtWidgets.QPlainTextEdit(self._container)
+                editor = NexusTextEditor(self._container)
                 editor.setPlainText('' if value is None else str(value))
                 editor.setPlaceholderText(placeholder)
                 editor.focusOutEvent = self._wrap_focus_out(editor.focusOutEvent, lambda e=editor, p=field_path: self.fieldValueEdited.emit(p, e.toPlainText()))
             else:
-                editor = QtWidgets.QLineEdit(self._container)
+                editor = NexusTextInput(self._container)
                 editor.setText('' if value is None else str(value))
                 editor.setPlaceholderText(placeholder)
                 editor.editingFinished.connect(lambda e=editor, p=field_path: self.fieldValueEdited.emit(p, e.text()))

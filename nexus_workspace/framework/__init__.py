@@ -40,6 +40,8 @@ _EXPORTS = {
     'NexusToolbar': ('nexus_workspace.framework.actions', 'NexusToolbar'),
     'build_action_from_payload': ('nexus_workspace.framework.actions', 'build_action_from_payload'),
     'register_nexus_command': ('nexus_workspace.framework.actions', 'register_nexus_command'),
+    'NexusWidgetMixin': ('nexus_workspace.framework.controls', 'NexusWidgetMixin'),
+    'get_nexus_widget_capabilities': ('nexus_workspace.framework.controls', 'get_nexus_widget_capabilities'),
     'NexusButton': ('nexus_workspace.framework.controls', 'NexusButton'),
     'NexusCheckBox': ('nexus_workspace.framework.controls', 'NexusCheckBox'),
     'NexusComboBox': ('nexus_workspace.framework.controls', 'NexusComboBox'),

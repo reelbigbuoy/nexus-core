@@ -109,6 +109,34 @@ class PluginLoader:
         self._publish_state()
         return self.records
 
+    def reload_plugin_at(self, plugin_root: Path):
+        """Load or reload a single plugin directory at runtime."""
+        plugin_root = Path(plugin_root)
+        manifest_path = plugin_root / 'plugin.json'
+        if not manifest_path.exists():
+            raise FileNotFoundError(f'No plugin manifest found at {manifest_path}')
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        except Exception as exc:
+            raise RuntimeError(f'Failed to read {manifest_path}: {exc}') from exc
+        plugin_id = str(manifest.get('plugin_id') or plugin_root.name).strip()
+        module_name = str(manifest.get('module') or '').strip()
+        package_name = module_name.split('.')[0] if module_name else ''
+        if hasattr(self.plugin_manager, 'unregister_plugin'):
+            self.plugin_manager.unregister_plugin(plugin_id)
+        if package_name:
+            for name in list(sys.modules.keys()):
+                if name == package_name or name.startswith(package_name + '.'):
+                    sys.modules.pop(name, None)
+        importlib.invalidate_caches()
+        record = self._load_manifest_path(manifest_path)
+        self.records = [existing for existing in self.records if existing.plugin_id != plugin_id]
+        if record is not None:
+            self.records.append(record)
+        self.records.sort(key=lambda item: (item.display_name or item.plugin_id).lower())
+        self._publish_state()
+        return record
+
     def default_search_paths(self) -> List[Path]:
         base_dir = Path(__file__).resolve().parents[2]
         search_paths = [

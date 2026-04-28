@@ -1,0 +1,26 @@
+{
+  "schema": "nexus.plugin_manifest.v1",
+  "plugin_id": "PluginBuilder",
+  "display_name": "Plugin Builder",
+  "version": "1.7.9",
+  "type": "tool",
+  "source": "official",
+  "module": "plugin_builder.plugin",
+  "class": "PluginBuilderPlugin",
+  "import_root": ".",
+  "enabled": true,
+  "min_nexus_version": "1.0.0",
+  "provider": {
+    "name": "Reel Big Buoy Company",
+    "id": "reelbigbuoy"
+  },
+  "distribution": {
+    "channel": "official",
+    "source": "official",
+    "trust": "first_party"
+  },
+  "ownership": {
+    "class": "first_party"
+  },
+  "display_category": "Official"
+}
