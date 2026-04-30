@@ -448,6 +448,25 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
 
         QtCore.QTimer.singleShot(0, _frame)
 
+    def _inline_translated_route_points(self, conn_data, anchor, min_x, min_y):
+        """Translate sub-graph wire bend points into parent-scene inline coordinates.
+
+        Stored sub-graph route_points are authored in the nested graph's local scene
+        coordinate system. Inline expansion offsets child nodes into the parent scene;
+        applying the same offset to bend points preserves the exact routing the user
+        created when editing the sub-graph directly.
+        """
+        translated = []
+        dx = float(anchor.x()) - float(min_x)
+        dy = float(anchor.y()) - float(min_y)
+        for point in (conn_data or {}).get("route_points", []) or []:
+            try:
+                x, y = point
+                translated.append([float(x) + dx, float(y) + dy])
+            except Exception:
+                continue
+        return translated
+
     def expand_subgraph_node(self, node_item):
         """Visually expand a sub-graph inline without permanently flattening the model."""
         if not self.is_subgraph_container_node(node_item):
@@ -527,7 +546,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 cloned = dict(conn)
                 cloned["source_node_id"] = self._new_node_id(src, remap)
                 cloned["target_node_id"] = self._new_node_id(tgt, remap)
-                cloned["route_points"] = []
+                cloned["route_points"] = self._inline_translated_route_points(conn, anchor, min_x, min_y)
                 citem = self.scene.add_connection_from_dict(cloned)
                 if citem is not None:
                     citem._inline_subgraph_display = True
@@ -538,7 +557,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     bridged["source_node_id"] = ext.get("source_node_id")
                     bridged["source_port_name"] = ext.get("source_port_name")
                     bridged["target_node_id"] = self._new_node_id(edge.get("target_node_id"), remap)
-                    bridged["route_points"] = []
+                    bridged["route_points"] = self._inline_translated_route_points(edge, anchor, min_x, min_y)
                     citem = self.scene.add_connection_from_dict(bridged)
                     if citem is not None:
                         citem._inline_subgraph_display = True
@@ -549,7 +568,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     bridged["source_node_id"] = self._new_node_id(edge.get("source_node_id"), remap)
                     bridged["target_node_id"] = ext.get("target_node_id")
                     bridged["target_port_name"] = ext.get("target_port_name")
-                    bridged["route_points"] = []
+                    bridged["route_points"] = self._inline_translated_route_points(edge, anchor, min_x, min_y)
                     citem = self.scene.add_connection_from_dict(bridged)
                     if citem is not None:
                         citem._inline_subgraph_display = True

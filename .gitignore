@@ -1,0 +1,43 @@
+# =========================
+# Python Cache
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# Virtual Environments (optional but recommended)
+# =========================
+venv/
+.env/
+.venv/
+
+# =========================
+# OS / Editor Junk
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# =========================
+# Nexus Plugin Folders to Ignore
+# =========================
+plugins/marketplace/
+plugins/organization/
+plugins/third_party/
+plugins/Enterprise/
+
+# =========================
+# Logs / Temp Files
+# =========================
+*.log
+*.tmp
+*.swp
+
+# =========================
+# Build / Distribution
+# =========================
+build/
+dist/
+*.egg-info/

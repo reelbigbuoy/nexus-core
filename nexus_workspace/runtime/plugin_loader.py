@@ -37,6 +37,8 @@ PLUGIN_SOURCE_ROOTS = {
     'owner': {'channel': 'manual', 'source': 'owner', 'trust': 'owner', 'ownership': 'personal'},
     'official': {'channel': 'official', 'source': 'official', 'trust': 'first_party', 'ownership': 'first_party'},
     'organization': {'channel': 'organization', 'source': 'private', 'trust': 'organization', 'ownership': 'organization'},
+    'Enterprise': {'channel': 'enterprise', 'source': 'private', 'trust': 'organization', 'ownership': 'organization'},
+    'enterprise': {'channel': 'enterprise', 'source': 'private', 'trust': 'organization', 'ownership': 'organization'},
     'marketplace': {'channel': 'marketplace', 'source': 'signed', 'trust': 'verified', 'ownership': 'third_party'},
     'third_party': {'channel': 'manual', 'source': 'external', 'trust': 'unverified', 'ownership': 'third_party'},
     'legacy_external': {'channel': 'manual', 'source': 'external', 'trust': 'unverified', 'ownership': 'third_party'},
