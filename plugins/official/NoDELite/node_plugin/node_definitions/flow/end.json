@@ -1,0 +1,13 @@
+{
+  "type_id": "flow.end",
+  "name": "End",
+  "category": "Flow",
+  "description": "Control-flow exit point for a graph or sub-graph. When this graph is used as a sub-graph, reaching End returns execution to the container Exec Out port.",
+  "inputs": [
+    {"id": "exec_in", "name": "Exec In", "direction": "input", "data_type": "exec", "connection_kind": "exec", "multi_connection": false, "required": false}
+  ],
+  "outputs": [],
+  "visual": {"color": "#27ae60", "icon": "end"},
+  "tags": ["control-flow", "exit", "end", "subgraph"],
+  "metadata": {"control_flow_boundary": "end", "graph_boundary": "exit"}
+}

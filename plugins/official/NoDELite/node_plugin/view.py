@@ -12,7 +12,7 @@
 from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from .constants import ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, FIT_PADDING
 from .definitions import NODE_REGISTRY, NodeDefinitionRegistry
-from .graphics_items import NodeItem, ConnectionItem, PortItem, ConnectionPinItem, _distance_to_segment
+from .graphics_items import NodeItem, ConnectionItem, PortItem, ConnectionPinItem, InlineSubgraphBoundaryItem, _distance_to_segment
 from .commands import AddNodeCommand
 
 
@@ -316,9 +316,17 @@ class GraphView(QtWidgets.QGraphicsView):
             self.frame_items(selected)
             return
 
+        self.frame_visible_graph()
+
+    def frame_visible_graph(self):
+        """Frame visible graph content, including inline sub-graph boundaries."""
+        scene = self.scene()
+        if scene is None:
+            return
+
         graph_items = [
             item for item in scene.items()
-            if isinstance(item, (NodeItem, ConnectionItem))
+            if isinstance(item, (NodeItem, ConnectionItem, InlineSubgraphBoundaryItem)) and item.isVisible()
         ]
         self.frame_items(graph_items)
 
@@ -364,6 +372,15 @@ class GraphView(QtWidgets.QGraphicsView):
         menu = QtWidgets.QMenu(self)
         menu.setToolTipsVisible(True)
 
+        is_subgraph = bool(editor is not None and hasattr(editor, 'is_subgraph_container_node') and editor.is_subgraph_container_node(node_item))
+        if is_subgraph:
+            act_open_subgraph = menu.addAction("Open Sub-Graph")
+            act_expand_subgraph = menu.addAction("Expand Sub-Graph Here")
+            menu.addSeparator()
+        else:
+            act_open_subgraph = None
+            act_expand_subgraph = None
+
         act_delete = menu.addAction("Delete")
         act_delete.setShortcut(QtGui.QKeySequence.Delete)
         act_cut = menu.addAction("Cut")
@@ -379,7 +396,11 @@ class GraphView(QtWidgets.QGraphicsView):
         chosen = menu.exec_(global_pos)
         if chosen is None or editor is None:
             return
-        if chosen is act_delete:
+        if chosen is act_open_subgraph:
+            editor.open_subgraph_for_node(node_item)
+        elif chosen is act_expand_subgraph:
+            editor.expand_subgraph_node(node_item)
+        elif chosen is act_delete:
             editor.delete_selected_items()
         elif chosen is act_cut:
             editor.cut()
@@ -753,7 +774,9 @@ class GraphView(QtWidgets.QGraphicsView):
             if isinstance(item, NodeItem):
                 editor = getattr(self, "editor", None)
                 if editor is not None:
-                    if getattr(editor, 'is_runtime_breakpoint_toggle_active', lambda: False)() and getattr(editor, 'node_supports_runtime_breakpoint', lambda _item: False)(item):
+                    if getattr(editor, 'is_subgraph_container_node', lambda _item: False)(item):
+                        editor.open_subgraph_for_node(item)
+                    elif getattr(editor, 'is_runtime_breakpoint_toggle_active', lambda: False)() and getattr(editor, 'node_supports_runtime_breakpoint', lambda _item: False)(item):
                         editor.toggle_node_breakpoint(item)
                     else:
                         editor.open_properties_for_node(item)

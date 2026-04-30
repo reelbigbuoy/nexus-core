@@ -14,7 +14,7 @@ from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from nexus_workspace.core.themes import THEMES
 from .constants import GRID_SIZE
 from .definitions import TestNodeData, node_definition_for_type, create_node_entry
-from .graphics_items import NodeItem, PortItem, ConnectionItem
+from .graphics_items import NodeItem, PortItem, ConnectionItem, InlineSubgraphBoundaryItem
 from .commands import AddConnectionCommand, MoveNodeCommand, UpdateConnectionCommand, SetConnectionRoutePointsCommand
 from .models import GraphConnectionData
 
@@ -56,7 +56,7 @@ class GraphScene(QtWidgets.QGraphicsScene):
         has_bounds = False
 
         for item in self.items():
-            if isinstance(item, (NodeItem, ConnectionItem)):
+            if isinstance(item, (NodeItem, ConnectionItem, InlineSubgraphBoundaryItem)):
                 item_rect = item.sceneBoundingRect()
                 if item_rect.isValid() and not item_rect.isNull():
                     bounds = item_rect if not has_bounds else bounds.united(item_rect)
@@ -139,8 +139,12 @@ class GraphScene(QtWidgets.QGraphicsScene):
             merged_properties = definition.default_properties()
             merged_properties.update(node_data.properties or {})
             node_data.properties = merged_properties
-            inputs = node_entry.get("inputs") or [port.name for port in definition.inputs]
-            outputs = node_entry.get("outputs") or [port.name for port in definition.outputs]
+            inputs = node_entry.get("inputs") if "inputs" in node_entry else [port.name for port in definition.inputs]
+            outputs = node_entry.get("outputs") if "outputs" in node_entry else [port.name for port in definition.outputs]
+            metadata = getattr(definition, "metadata", {}) or {}
+            if metadata.get("dynamic_output_ports_from") == "columns":
+                columns = list((node_data.properties or {}).get("columns", []))
+                outputs = [str(column.get("name") or f"column_{index + 1}") for index, column in enumerate(columns)]
             if not node_data.title or node_data.title == "Node":
                 node_data.title = definition.display_name
         else:
@@ -698,6 +702,8 @@ class GraphScene(QtWidgets.QGraphicsScene):
         connections = []
 
         for item in self.items():
+            if getattr(item, '_inline_subgraph_display', False):
+                continue
             if isinstance(item, NodeItem):
                 nodes.append(item.to_dict())
             elif isinstance(item, ConnectionItem):

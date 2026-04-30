@@ -10,7 +10,11 @@
     "test_entry_node",
     "stage_node",
     "test_entry_node_2",
-    "tom_node"
+    "tom_node",
+    "flow.start",
+    "flow.end",
+    "flow.subgraph_container",
+    "table.table_data"
   ],
   "exclude_categories": [],
   "exclude_type_ids": [],
@@ -22,7 +26,11 @@
     "enforce_data_type_compatibility": false,
     "cycle_checked_connection_kinds": [
       "exec"
-    ]
+    ],
+    "max_nodes_per_type": {
+      "flow.start": 1,
+      "flow.end": 1
+    }
   },
   "connection_styles": {
     "data": {

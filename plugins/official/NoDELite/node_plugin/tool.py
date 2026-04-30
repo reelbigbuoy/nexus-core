@@ -10,7 +10,9 @@
 # ============================================================================
 
 import json
+import csv
 import os
+import uuid
 from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from nexus_workspace.core.serialization import NexusSerializable
 from nexus_workspace.core.themes import build_stylesheet, get_theme_colors
@@ -22,7 +24,7 @@ from .scene import GraphScene
 from .commands import AddNodeCommand, DeleteItemsCommand, PasteItemsCommand, RenameNodeCommand, SetNodePropertyCommand
 from .definitions import NODE_REGISTRY, NODE_DEFINITIONS_DIR, load_external_node_definitions, node_definition_for_type, create_node_entry
 from .node_views import NODE_VIEW_MANIFESTS_DIR, NODE_VIEW_REGISTRY, NodeViewSession, NodeViewRules, load_node_views
-from .graphics_items import NodeItem, ConnectionItem, ConnectionPinItem
+from .graphics_items import NodeItem, ConnectionItem, ConnectionPinItem, InlineSubgraphBoundaryItem
 
 
 class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
@@ -65,6 +67,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._active_node_view_id = self._node_view_session.active_view_id()
         self._selection_publisher = SelectionPublisher(plugin_context=plugin_context, tool=self, plugin_id='NoDELite')
         self._action_handler_scope = None
+        self._graph_context_stack = []
+        self._root_graph_data = None
+        self._inline_subgraph_expansions = {}
 
         self._connect_action_requests()
         self._build_local_menus()
@@ -176,10 +181,22 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._viewHeaderDescriptionLabel.setWordWrap(True)
         self._viewHeaderDescriptionLabel.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
 
+        self._subgraphBackButton = QtWidgets.QPushButton("Back to Parent", self._viewHeaderFrame)
+        self._subgraphBackButton.setObjectName("nodeSubgraphBackButton")
+        self._subgraphBackButton.clicked.connect(self.close_current_subgraph)
+        self._subgraphBackButton.hide()
+
+        self._subgraphPathLabel = QtWidgets.QLabel("", self._viewHeaderFrame)
+        self._subgraphPathLabel.setObjectName("nodeSubgraphPathLabel")
+        self._subgraphPathLabel.setAlignment(QtCore.Qt.AlignCenter)
+        self._subgraphPathLabel.hide()
+
         header_layout.addWidget(self._viewHeaderLabel, 0)
         header_layout.addWidget(self._viewHeaderNameBadge, 0)
         header_layout.addWidget(self._viewHeaderStateBadge, 0)
         header_layout.addWidget(self._viewHeaderDescriptionLabel, 1)
+        header_layout.addWidget(self._subgraphPathLabel, 0)
+        header_layout.addWidget(self._subgraphBackButton, 0)
         editor_layout.addWidget(self._viewHeaderFrame, 0)
         editor_layout.addWidget(self.graphView, 1)
 
@@ -257,6 +274,373 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
     def _graph_has_content(self):
         return any(isinstance(item, (NodeItem, ConnectionItem)) for item in self.scene.items())
 
+    def is_subgraph_container_node(self, node_item):
+        definition = getattr(node_item, "definition", None)
+        if definition is None:
+            return False
+        metadata = getattr(definition, "metadata", {}) or {}
+        return bool(metadata.get("is_subgraph_container") or node_item.node_data.node_type == "flow.subgraph_container")
+
+    def _default_subgraph_data(self, graph_name="Sub-Graph"):
+        return {
+            "metadata": {
+                "active_node_view_id": self._active_node_view_id,
+                "graph_kind": "subgraph",
+                "graph_name": graph_name or "Sub-Graph",
+            },
+            "nodes": [
+                create_node_entry("flow.start", pos=QtCore.QPointF(-240, 0), title="Start"),
+                create_node_entry("flow.end", pos=QtCore.QPointF(240, 0), title="End"),
+            ],
+            "connections": [],
+        }
+
+    def _normalize_graph_control_flow_boundaries(self, graph_data):
+        """Migrate legacy sub-graph boundary nodes to universal Start/End nodes."""
+        if not isinstance(graph_data, dict):
+            return graph_data
+        for entry in graph_data.get("nodes", []) or []:
+            node_data = entry.get("node_data", {}) if isinstance(entry, dict) else {}
+            node_type = node_data.get("node_type")
+            if node_type in ("flow.subgraph_input", "flow.start"):
+                node_data["node_type"] = "flow.start"
+                node_data["title"] = "Start"
+                entry["inputs"] = []
+                entry["outputs"] = ["Exec Out"]
+            elif node_type in ("flow.subgraph_output", "flow.end"):
+                node_data["node_type"] = "flow.end"
+                node_data["title"] = "End"
+                entry["inputs"] = ["Exec In"]
+                entry["outputs"] = []
+        return graph_data
+
+    def _ensure_graph_control_flow_nodes(self, graph_data):
+        graph_data = self._normalize_graph_control_flow_boundaries(graph_data or {"nodes": [], "connections": []})
+        nodes = graph_data.setdefault("nodes", [])
+        node_types = [((entry.get("node_data", {}) if isinstance(entry, dict) else {}).get("node_type")) for entry in nodes]
+        if "flow.start" not in node_types:
+            nodes.append(create_node_entry("flow.start", pos=QtCore.QPointF(-240, 0), title="Start"))
+        if "flow.end" not in node_types:
+            nodes.append(create_node_entry("flow.end", pos=QtCore.QPointF(240, 0), title="End"))
+        graph_data.setdefault("connections", [])
+        return graph_data
+
+    def _ensure_current_graph_control_flow_nodes(self):
+        if self.active_node_view() is None or self._graph_has_content():
+            return False
+        graph_data = self._ensure_graph_control_flow_nodes({"nodes": [], "connections": []})
+        self.scene._suspend_undo = True
+        try:
+            self.scene.load_graph(self._ensure_graph_control_flow_nodes(graph_data))
+        finally:
+            self.scene._suspend_undo = False
+        self.undo_stack.clear()
+        self._initial_fit_pending = True
+        QtCore.QTimer.singleShot(0, self._ensure_initial_fit)
+        return True
+
+    def _find_node_properties_in_graph(self, graph_data, node_id):
+        if not isinstance(graph_data, dict):
+            return None
+        for entry in graph_data.get("nodes", []) or []:
+            data = entry.get("node_data", {}) if isinstance(entry, dict) else {}
+            if data.get("node_id") == node_id:
+                return data.setdefault("properties", {})
+        return None
+
+    def _save_current_graph_context(self):
+        self.collapse_all_inline_subgraphs()
+        current_graph = self.scene.serialize_graph()
+        metadata = current_graph.setdefault("metadata", {})
+        metadata["active_node_view_id"] = self._active_node_view_id
+        if self._graph_context_stack:
+            context = self._graph_context_stack[-1]
+            context["node_properties"]["subgraph"] = current_graph
+            context["node_properties"].setdefault("graph_name", metadata.get("graph_name", "Sub-Graph"))
+        else:
+            self._root_graph_data = current_graph
+        return current_graph
+
+    def _load_graph_context(self, graph_data):
+        self.collapse_all_inline_subgraphs()
+        self.scene._suspend_undo = True
+        try:
+            self.scene.load_graph(self._ensure_graph_control_flow_nodes(graph_data or {"nodes": [], "connections": []}))
+        finally:
+            self.scene._suspend_undo = False
+        self.undo_stack.clear()
+        self.selected_node_item = None
+        self.clear_property_panel()
+        self._refresh_node_view_ui()
+        self._initial_fit_pending = True
+        QtCore.QTimer.singleShot(0, self._ensure_initial_fit)
+
+    def open_subgraph_for_node(self, node_item):
+        if not self.is_subgraph_container_node(node_item):
+            self.open_properties_for_node(node_item)
+            return False
+        parent_graph = self._save_current_graph_context()
+        node_properties = self._find_node_properties_in_graph(parent_graph, node_item.node_data.node_id) or node_item.node_data.properties
+        graph_name = node_properties.get("graph_name") or node_item.node_data.title or "Sub-Graph"
+        subgraph = node_properties.get("subgraph")
+        if not isinstance(subgraph, dict) or not subgraph.get("nodes"):
+            subgraph = self._default_subgraph_data(graph_name)
+            node_properties["subgraph"] = subgraph
+        context = {
+            "node_id": node_item.node_data.node_id,
+            "title": node_item.node_data.title,
+            "node_properties": node_properties,
+        }
+        self._graph_context_stack.append(context)
+        self._load_graph_context(subgraph)
+        self._status_message("Opened sub-graph: %s" % graph_name, 3500)
+        return True
+
+    def close_current_subgraph(self):
+        if not self._graph_context_stack:
+            return False
+        self._save_current_graph_context()
+        self._graph_context_stack.pop()
+        if self._graph_context_stack:
+            parent_graph = self._graph_context_stack[-1]["node_properties"].get("subgraph", {})
+        else:
+            parent_graph = self._root_graph_data or {"nodes": [], "connections": []}
+        self._load_graph_context(parent_graph)
+        self._status_message("Returned to parent graph", 2500)
+        return True
+
+    def _current_subgraph_path(self):
+        if not self._graph_context_stack:
+            return ""
+        labels = []
+        for context in self._graph_context_stack:
+            props = context.get("node_properties") or {}
+            labels.append(str(props.get("graph_name") or context.get("title") or "Sub-Graph"))
+        return " / ".join(labels)
+
+    def _new_node_id(self, old_id, remap):
+        if old_id not in remap:
+            remap[old_id] = str(uuid.uuid4())
+        return remap[old_id]
+
+    def toggle_inline_subgraph_node(self, node_item):
+        if node_item is None:
+            return False
+        node_id = node_item.node_data.node_id
+        if node_id in self._inline_subgraph_expansions:
+            return self.collapse_inline_subgraph(node_id)
+        return self.expand_subgraph_node(node_item)
+
+    def _reframe_visible_graph_after_layout_change(self):
+        """Reframe after inline expansion/collapse changes the visible layout."""
+        view = getattr(self, "graphView", None)
+        if view is None:
+            return
+
+        def _frame():
+            try:
+                if hasattr(view, "frame_visible_graph"):
+                    view.frame_visible_graph()
+                else:
+                    view.frame_selected_or_all()
+            except RuntimeError:
+                pass
+
+        QtCore.QTimer.singleShot(0, _frame)
+
+    def expand_subgraph_node(self, node_item):
+        """Visually expand a sub-graph inline without permanently flattening the model."""
+        if not self.is_subgraph_container_node(node_item):
+            return False
+        container_id = node_item.node_data.node_id
+        if container_id in self._inline_subgraph_expansions:
+            return True
+        subgraph = node_item.node_data.properties.get("subgraph")
+        if not isinstance(subgraph, dict) or not subgraph.get("nodes"):
+            subgraph = self._default_subgraph_data(node_item.node_data.properties.get("graph_name") or node_item.node_data.title)
+            node_item.node_data.properties["subgraph"] = subgraph
+        subgraph = self._ensure_graph_control_flow_nodes(subgraph)
+        start_ids, end_ids, inner_nodes = set(), set(), []
+        for entry in subgraph.get("nodes", []):
+            data = entry.get("node_data", {}) if isinstance(entry, dict) else {}
+            node_type = data.get("node_type")
+            node_id = data.get("node_id")
+            if node_type in ("flow.subgraph_input", "flow.start"):
+                start_ids.add(node_id)
+            elif node_type in ("flow.subgraph_output", "flow.end"):
+                end_ids.add(node_id)
+            else:
+                inner_nodes.append(entry)
+        if not inner_nodes:
+            self._status_message("Sub-graph has no internal nodes between Start and End", 3500)
+            return False
+        xs = [float((e.get("node_data", {}) or {}).get("x", 0.0)) for e in inner_nodes]
+        ys = [float((e.get("node_data", {}) or {}).get("y", 0.0)) for e in inner_nodes]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        content_w = max(360.0, (max_x - min_x) + 260.0)
+        gap = 120.0
+        shift_amount = content_w + gap
+        anchor = node_item.scenePos() + QtCore.QPointF(node_item.boundingRect().width() + 120.0, 0.0)
+        self.scene._suspend_undo = True
+        # Inline expansion is a reversible visual transaction. Snapshot every
+        # real node before any visual shifting so collapse can restore the exact
+        # pre-expansion layout, including the original container node.
+        original_positions = {}
+        shifted_positions = {}
+        created_nodes = []
+        created_connections = []
+        hidden_connections = []
+        try:
+            for item in list(self.scene.items()):
+                if isinstance(item, NodeItem) and not getattr(item, '_inline_subgraph_display', False):
+                    original_positions[item.node_data.node_id] = QtCore.QPointF(item.pos())
+            threshold_x = node_item.sceneBoundingRect().right() + 20.0
+            for item in list(self.scene.items()):
+                if isinstance(item, NodeItem) and item is not node_item and not getattr(item, '_inline_subgraph_display', False):
+                    if item.scenePos().x() > threshold_x:
+                        shifted_positions[item.node_data.node_id] = QtCore.QPointF(item.pos())
+                        item.setPos(item.pos() + QtCore.QPointF(shift_amount, 0.0))
+            remap = {}
+            for entry in inner_nodes:
+                clone = json.loads(json.dumps(entry))
+                data = clone.setdefault("node_data", {})
+                old_id = data.get("node_id")
+                data["node_id"] = self._new_node_id(old_id, remap)
+                data["x"] = anchor.x() + (float(data.get("x", 0.0)) - min_x)
+                data["y"] = anchor.y() + (float(data.get("y", 0.0)) - min_y)
+                data.setdefault("properties", {})["__inline_subgraph_parent"] = container_id
+                item = self.scene.add_node_from_entry(clone, select_new=False)
+                if item is not None:
+                    item._inline_subgraph_display = True
+                    item.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, False)
+                    item.setOpacity(0.96)
+                    created_nodes.append(item)
+            external_in = [c for c in self.scene.serialize_graph().get("connections", []) if c.get("target_node_id") == container_id]
+            external_out = [c for c in self.scene.serialize_graph().get("connections", []) if c.get("source_node_id") == container_id]
+            start_edges = [c for c in subgraph.get("connections", []) if c.get("source_node_id") in start_ids and c.get("target_node_id") not in end_ids]
+            end_edges = [c for c in subgraph.get("connections", []) if c.get("target_node_id") in end_ids and c.get("source_node_id") not in start_ids]
+            for conn in subgraph.get("connections", []):
+                src, tgt = conn.get("source_node_id"), conn.get("target_node_id")
+                if src in start_ids or tgt in end_ids or src in end_ids or tgt in start_ids:
+                    continue
+                cloned = dict(conn)
+                cloned["source_node_id"] = self._new_node_id(src, remap)
+                cloned["target_node_id"] = self._new_node_id(tgt, remap)
+                cloned["route_points"] = []
+                citem = self.scene.add_connection_from_dict(cloned)
+                if citem is not None:
+                    citem._inline_subgraph_display = True
+                    created_connections.append(citem)
+            for ext in external_in:
+                for edge in start_edges:
+                    bridged = dict(edge)
+                    bridged["source_node_id"] = ext.get("source_node_id")
+                    bridged["source_port_name"] = ext.get("source_port_name")
+                    bridged["target_node_id"] = self._new_node_id(edge.get("target_node_id"), remap)
+                    bridged["route_points"] = []
+                    citem = self.scene.add_connection_from_dict(bridged)
+                    if citem is not None:
+                        citem._inline_subgraph_display = True
+                        created_connections.append(citem)
+            for edge in end_edges:
+                for ext in external_out:
+                    bridged = dict(edge)
+                    bridged["source_node_id"] = self._new_node_id(edge.get("source_node_id"), remap)
+                    bridged["target_node_id"] = ext.get("target_node_id")
+                    bridged["target_port_name"] = ext.get("target_port_name")
+                    bridged["route_points"] = []
+                    citem = self.scene.add_connection_from_dict(bridged)
+                    if citem is not None:
+                        citem._inline_subgraph_display = True
+                        created_connections.append(citem)
+            for conn in list(self.scene.items()):
+                if isinstance(conn, ConnectionItem) and not getattr(conn, '_inline_subgraph_display', False):
+                    data = conn.to_dict()
+                    if data and (data.get("source_node_id") == container_id or data.get("target_node_id") == container_id):
+                        conn.setVisible(False)
+                        hidden_connections.append(conn)
+            # The expanded dashed boundary visually replaces the container. The
+            # container remains in the model so save/load and collapse semantics
+            # stay stable, but it is hidden while the inline expansion is open.
+            node_item.setVisible(False)
+            node_rect = QtCore.QRectF()
+            for item in created_nodes:
+                node_rect = item.sceneBoundingRect() if node_rect.isNull() else node_rect.united(item.sceneBoundingRect())
+            boundary_title = getattr(node_item, 'title', None) or node_item.node_data.title or 'Sub-Graph'
+            boundary = InlineSubgraphBoundaryItem(self, container_id, node_rect.adjusted(-35, -62, 45, 45), title=boundary_title)
+            boundary._inline_subgraph_display = True
+            self.scene.addItem(boundary)
+            self._inline_subgraph_expansions[container_id] = {
+                "nodes": created_nodes,
+                "connections": created_connections,
+                "boundary": boundary,
+                "original_positions": original_positions,
+                "shifted_positions": shifted_positions,
+                "hidden_connections": hidden_connections,
+                "container_node": node_item,
+            }
+        finally:
+            self.scene._suspend_undo = False
+        self.scene.clearSelection()
+        self._reframe_visible_graph_after_layout_change()
+        self._status_message("Expanded sub-graph inline", 3500)
+        return True
+
+    def collapse_inline_subgraph(self, container_node_id):
+        expansion = self._inline_subgraph_expansions.pop(container_node_id, None)
+        if not expansion:
+            return False
+        self.scene._suspend_undo = True
+        try:
+            container_node = expansion.get("container_node") or self.scene.find_node_by_id(container_node_id)
+            if container_node is not None:
+                try:
+                    container_node.setVisible(True)
+                except RuntimeError:
+                    pass
+            for conn in expansion.get("hidden_connections", []):
+                try:
+                    conn.setVisible(True)
+                except RuntimeError:
+                    pass
+            for conn in list(expansion.get("connections", [])):
+                try:
+                    conn.remove_from_ports()
+                    for pin in list(getattr(conn, 'pin_items', [])):
+                        self.scene.removeItem(pin)
+                    self.scene.removeItem(conn)
+                except RuntimeError:
+                    pass
+            for node in list(expansion.get("nodes", [])):
+                try:
+                    self.scene.removeItem(node)
+                except RuntimeError:
+                    pass
+            boundary = expansion.get("boundary")
+            if boundary is not None:
+                try:
+                    self.scene.removeItem(boundary)
+                except RuntimeError:
+                    pass
+            # Restore the full pre-expansion layout, not merely the nodes
+            # that were shifted. This guarantees the original container and all
+            # parent graph nodes return to their exact prior positions.
+            restore_positions = expansion.get("original_positions") or expansion.get("shifted_positions", {})
+            for node_id, old_pos in restore_positions.items():
+                node = self.scene.find_node_by_id(node_id)
+                if node is not None:
+                    node.setPos(old_pos)
+        finally:
+            self.scene._suspend_undo = False
+        self._reframe_visible_graph_after_layout_change()
+        self._status_message("Collapsed inline sub-graph", 2500)
+        return True
+
+    def collapse_all_inline_subgraphs(self):
+        for container_id in list(getattr(self, '_inline_subgraph_expansions', {}).keys()):
+            self.collapse_inline_subgraph(container_id)
+
     def _refresh_node_view_ui(self):
         view_definition = self.active_node_view()
         has_view = view_definition is not None
@@ -279,6 +663,14 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._viewHeaderNameBadge.setProperty("viewRole", "active" if has_view else "inactive")
         self._viewHeaderStateBadge.setProperty("viewRole", state_role)
         self._viewHeaderStateBadge.setText(state_text)
+        in_subgraph = bool(getattr(self, '_graph_context_stack', []))
+        if hasattr(self, '_subgraphBackButton'):
+            self._subgraphBackButton.setVisible(in_subgraph)
+        if hasattr(self, '_subgraphPathLabel'):
+            self._subgraphPathLabel.setVisible(in_subgraph)
+            self._subgraphPathLabel.setText(self._current_subgraph_path() if in_subgraph else "")
+        if in_subgraph:
+            self._viewHeaderDescriptionLabel.setText("Editing nested sub-graph. Start maps to the container Exec In; End maps back to the container Exec Out.")
         if hasattr(self, '_viewHeaderNameBadge'):
             self._repolish_widget(self._viewHeaderNameBadge)
         self._repolish_widget(self._viewHeaderStateBadge)
@@ -774,11 +1166,13 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self.tableEditorGroup = QtWidgets.QGroupBox("Table Data", properties_host)
         table_layout = QtWidgets.QVBoxLayout(self.tableEditorGroup)
         table_toolbar = QtWidgets.QHBoxLayout()
+        self.btnImportTableCsv = QtWidgets.QPushButton("Import CSV", self.tableEditorGroup)
         self.btnAddTableColumn = QtWidgets.QPushButton("Add Column", self.tableEditorGroup)
+        self.btnRenameTableColumn = QtWidgets.QPushButton("Rename Column", self.tableEditorGroup)
         self.btnRemoveTableColumn = QtWidgets.QPushButton("Remove Column", self.tableEditorGroup)
         self.btnAddTableRow = QtWidgets.QPushButton("Add Row", self.tableEditorGroup)
         self.btnRemoveTableRow = QtWidgets.QPushButton("Remove Row", self.tableEditorGroup)
-        for btn in (self.btnAddTableColumn, self.btnRemoveTableColumn, self.btnAddTableRow, self.btnRemoveTableRow):
+        for btn in (self.btnImportTableCsv, self.btnAddTableColumn, self.btnRenameTableColumn, self.btnRemoveTableColumn, self.btnAddTableRow, self.btnRemoveTableRow):
             table_toolbar.addWidget(btn)
         table_toolbar.addStretch(1)
         table_layout.addLayout(table_toolbar)
@@ -799,7 +1193,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         table_layout.addWidget(self.tableWidget)
         self.tableEditorGroup.hide()
 
+        self.btnImportTableCsv.clicked.connect(self.import_table_from_csv)
         self.btnAddTableColumn.clicked.connect(self.add_table_column)
+        self.btnRenameTableColumn.clicked.connect(self.rename_selected_table_column)
         self.btnRemoveTableColumn.clicked.connect(self.remove_selected_table_column)
         self.btnAddTableRow.clicked.connect(self.add_table_row)
         self.btnRemoveTableRow.clicked.connect(self.remove_selected_table_row)
@@ -940,9 +1336,16 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self.tableWidget.blockSignals(False)
             self._table_editor_updating = False
         header = self.tableWidget.horizontalHeader()
-        header.setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(110)
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        for column_index in range(self.tableWidget.columnCount()):
+            label = self.tableWidget.horizontalHeaderItem(column_index).text() if self.tableWidget.horizontalHeaderItem(column_index) else ""
+            text_width = self.tableWidget.fontMetrics().horizontalAdvance(label) + 36
+            self.tableWidget.setColumnWidth(column_index, max(120, text_width))
+        self.tableWidget.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.tableWidget.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
-        self.tableWidget.verticalHeader().setDefaultSectionSize(24)
+        self.tableWidget.verticalHeader().setDefaultSectionSize(26)
         self.tableWidget.viewport().update()
         self.tableWidget.update()
 
@@ -960,6 +1363,121 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             value = node_item.node_data.properties.get(prop_def.name, prop_def.default)
             self._set_editor_value(editor, prop_def, value)
 
+
+    def _table_column_names(self, node_item):
+        columns = list(node_item.node_data.properties.get("columns", []))
+        names = []
+        for index, column in enumerate(columns):
+            name = str(column.get("name") or f"column_{index + 1}").strip() or f"column_{index + 1}"
+            names.append(name)
+        return names
+
+    def _sync_table_node_ports(self, node_item):
+        if node_item is None or node_item.node_data.node_type != "table.table_data":
+            return
+        output_names = self._table_column_names(node_item)
+        node_item.rebuild_ports(inputs=[], outputs=output_names)
+        node_item.node_data.properties["columns"] = [
+            {"name": name, "type": "string"} for name in output_names
+        ]
+        node_item.update()
+        if hasattr(self, "scene") and self.scene is not None:
+            self.scene.update()
+
+    def _sanitize_csv_header(self, header, index, existing):
+        base = str(header or "").strip()
+        if not base:
+            base = f"column_{index + 1}"
+        # Keep labels readable but remove line breaks/tabs that make ports ugly.
+        base = " ".join(base.replace("\t", " ").replace("\r", " ").replace("\n", " ").split())
+        candidate = base
+        suffix = 2
+        while candidate in existing:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        existing.add(candidate)
+        return candidate
+
+    def import_table_from_csv(self):
+        if self.selected_node_item is None or self.selected_node_item.node_data.node_type != "table.table_data":
+            return
+        path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import CSV into Table Data Node",
+            "",
+            "CSV Files (*.csv);;All Files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                sample = handle.read(4096)
+                handle.seek(0)
+                try:
+                    dialect = csv.Sniffer().sniff(sample) if sample else csv.excel
+                except csv.Error:
+                    dialect = csv.excel
+                reader = csv.reader(handle, dialect)
+                raw_rows = list(reader)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Import CSV", f"Could not import CSV:\n{exc}")
+            return
+
+        if not raw_rows:
+            QtWidgets.QMessageBox.information(self, "Import CSV", "The selected CSV did not contain any rows.")
+            return
+
+        existing = set()
+        headers = [
+            self._sanitize_csv_header(value, index, existing)
+            for index, value in enumerate(raw_rows[0])
+        ]
+        data_rows = []
+        for raw in raw_rows[1:]:
+            row = {}
+            for index, header in enumerate(headers):
+                row[header] = raw[index] if index < len(raw) else ""
+            data_rows.append(row)
+
+        self.selected_node_item.node_data.properties["columns"] = [
+            {"name": header, "type": "string"} for header in headers
+        ]
+        self.selected_node_item.node_data.properties["rows"] = data_rows
+        self.selected_node_item.node_data.properties["source_csv"] = path
+        self._sync_table_node_ports(self.selected_node_item)
+        self.refresh_table_editor(self.selected_node_item)
+        self.on_node_mutated(self.selected_node_item)
+        self._status_message(f"Imported {len(data_rows)} CSV rows and {len(headers)} columns.", 3500)
+
+    def rename_selected_table_column(self):
+        if self.selected_node_item is None or self.selected_node_item.node_data.node_type != "table.table_data":
+            return
+        column_index = self.tableWidget.currentColumn()
+        columns = self.selected_node_item.node_data.properties.get("columns", [])
+        if column_index < 0 or column_index >= len(columns):
+            return
+        old_name = columns[column_index].get("name", f"column_{column_index + 1}")
+        new_name, accepted = QtWidgets.QInputDialog.getText(
+            self,
+            "Rename Table Column",
+            "Column name:",
+            text=old_name,
+        )
+        if not accepted:
+            return
+        new_name = str(new_name or "").strip()
+        if not new_name or new_name == old_name:
+            return
+        existing = {col.get("name") for idx, col in enumerate(columns) if idx != column_index}
+        if new_name in existing:
+            QtWidgets.QMessageBox.information(self, "Rename Table Column", "A column with that name already exists.")
+            return
+        columns[column_index]["name"] = new_name
+        for row in self.selected_node_item.node_data.properties.get("rows", []):
+            row[new_name] = row.pop(old_name, "")
+        self._sync_table_node_ports(self.selected_node_item)
+        self.refresh_table_editor(self.selected_node_item)
+
     def add_table_column(self):
         if self.selected_node_item is None or self.selected_node_item.node_data.node_type != "table.table_data":
             return
@@ -974,6 +1492,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         columns.append({"name": candidate, "type": "string"})
         for row in self.selected_node_item.node_data.properties.setdefault("rows", []):
             row.setdefault(candidate, "")
+        self._sync_table_node_ports(self.selected_node_item)
         self.refresh_table_editor(self.selected_node_item)
 
     def remove_selected_table_column(self):
@@ -987,6 +1506,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         removed_name = removed.get("name")
         for row in self.selected_node_item.node_data.properties.get("rows", []):
             row.pop(removed_name, None)
+        self._sync_table_node_ports(self.selected_node_item)
         self.refresh_table_editor(self.selected_node_item)
 
     def add_table_row(self):
@@ -1051,6 +1571,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._apply_active_node_view_registry()
         self._refresh_node_view_ui()
         self.set_editor_title(self._editor_title)
+        self._ensure_current_graph_control_flow_nodes()
         if announce:
             label = view_definition.name if view_definition is not None else "Not Selected"
             self._status_message("NoDE view: %s" % label, 3500)
@@ -1815,15 +2336,21 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
 
 
     def save_state(self):
+        graph_data = self._save_current_graph_context() if self._graph_context_stack else (self.collapse_all_inline_subgraphs() or self.scene.serialize_graph())
+        if self._graph_context_stack and self._root_graph_data is not None:
+            graph_data = self._root_graph_data
         return {
             "editor_title": self.editor_title(),
             "current_file_path": self.current_file_path,
             "properties_visible": self.dockProperties.isVisible(),
-            "graph": self.scene.serialize_graph(),
+            "graph": graph_data,
             "active_node_view_id": self._active_node_view_id,
         }
 
     def load_state(self, state):
+        self._graph_context_stack = []
+        self._root_graph_data = None
+        self._inline_subgraph_expansions = {}
         if not state:
             self._refresh_node_view_ui()
             return
@@ -1860,7 +2387,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 )
             self.scene._suspend_undo = True
             try:
-                self.scene.load_graph(graph_data)
+                self.scene.load_graph(self._ensure_graph_control_flow_nodes(graph_data))
             finally:
                 self.scene._suspend_undo = False
             self.undo_stack.clear()
@@ -1914,7 +2441,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         return self._save_graph_to_path(file_path)
 
     def _save_graph_to_path(self, file_path):
-        graph_data = self.scene.serialize_graph()
+        graph_data = self._save_current_graph_context() if self._graph_context_stack else (self.collapse_all_inline_subgraphs() or self.scene.serialize_graph())
+        if self._graph_context_stack and self._root_graph_data is not None:
+            graph_data = self._root_graph_data
         metadata = graph_data.setdefault("metadata", {})
         metadata["active_node_view_id"] = self._active_node_view_id
 
@@ -1944,6 +2473,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             with open(file_path, "r", encoding="utf-8") as f:
                 graph_data = json.load(f)
 
+            self._graph_context_stack = []
+            self._root_graph_data = None
+            self._inline_subgraph_expansions = {}
             metadata = graph_data.get("metadata") if isinstance(graph_data, dict) else None
             active_view_id = metadata.get("active_node_view_id") if isinstance(metadata, dict) else None
             if active_view_id is not None:
@@ -1973,7 +2505,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
 
             self.scene._suspend_undo = True
             try:
-                self.scene.load_graph(graph_data)
+                self.scene.load_graph(self._ensure_graph_control_flow_nodes(graph_data))
             finally:
                 self.scene._suspend_undo = False
 

@@ -1,0 +1,13 @@
+{
+  "type_id": "flow.subgraph_input",
+  "name": "Sub-Graph Input",
+  "category": "Flow",
+  "description": "Boundary output for a nested sub-graph. Connect this to the first executable node inside the sub-graph.",
+  "inputs": [],
+  "outputs": [
+    {"id": "exec_out", "name": "Exec Out", "direction": "output", "data_type": "exec", "connection_kind": "exec"}
+  ],
+  "visual": {"color": "#2f80ed", "icon": "entry"},
+  "tags": ["subgraph", "boundary", "input", "entry"],
+  "metadata": {"subgraph_boundary": "input", "deprecated": true, "replaced_by": "flow.start"}
+}

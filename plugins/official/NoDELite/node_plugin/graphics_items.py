@@ -53,7 +53,8 @@ class PortItem(QtWidgets.QGraphicsItem):
 
     def _reposition(self):
         y = TITLE_HEIGHT + 20 + self.index * PORT_SPACING
-        x = 0 if self.port_type == self.INPUT else NODE_WIDTH
+        node_width = getattr(self.parent_node, "width", NODE_WIDTH)
+        x = 0 if self.port_type == self.INPUT else node_width
         self.setPos(x, y)
 
     def boundingRect(self):
@@ -517,6 +518,76 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
                 painter.drawEllipse(local, 3.0, 3.0)
 
 
+
+class InlineSubgraphBoundaryItem(QtWidgets.QGraphicsItem):
+    """Temporary dashed boundary used when a sub-graph is expanded inline."""
+    TITLE_HEIGHT = 34.0
+
+    def __init__(self, editor, container_node_id, rect, title='Sub-Graph'):
+        super().__init__()
+        self.editor = editor
+        self.container_node_id = container_node_id
+        self.title = str(title or 'Sub-Graph')
+        self._rect = QtCore.QRectF(rect)
+        self.setZValue(-2)
+        self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
+
+    def boundingRect(self):
+        return self._rect.adjusted(-6, -6, 6, 6)
+
+    def _title_rect(self):
+        return QtCore.QRectF(self._rect.left(), self._rect.top(), self._rect.width(), self.TITLE_HEIGHT)
+
+    def _button_rect(self):
+        title_rect = self._title_rect()
+        return QtCore.QRectF(title_rect.right() - 30, title_rect.top() + 6, 22, 22)
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        scene = self.scene()
+        theme = scene.theme if scene is not None and hasattr(scene, 'theme') else THEMES['Midnight']
+        border = QtGui.QColor(theme.get('node_selected', '#6aa9ff'))
+        fill = QtGui.QColor(theme.get('node_bg', '#20242b'))
+        title_fill = QtGui.QColor(theme.get('node_title', '#2c3440'))
+        text_color = QtGui.QColor(theme.get('text', '#ffffff'))
+        fill.setAlpha(28)
+
+        painter.setPen(QtGui.QPen(border, 2.0, QtCore.Qt.DashLine))
+        painter.setBrush(QtGui.QBrush(fill))
+        painter.drawRoundedRect(self._rect, 12, 12)
+
+        title_rect = self._title_rect()
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QBrush(title_fill))
+        painter.drawRoundedRect(title_rect, 12, 12)
+        painter.drawRect(title_rect.left(), title_rect.bottom() - 12, title_rect.width(), 12)
+
+        painter.setPen(QtGui.QPen(border, 2.0, QtCore.Qt.DashLine))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawRoundedRect(self._rect, 12, 12)
+
+        font = painter.font()
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QtGui.QPen(text_color))
+        painter.drawText(title_rect.adjusted(12, 0, -42, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, self.title)
+
+        btn = self._button_rect()
+        painter.setPen(QtGui.QPen(border, 1.4))
+        painter.setBrush(QtGui.QBrush(title_fill.lighter(112)))
+        painter.drawRoundedRect(btn, 5, 5)
+        painter.setPen(QtGui.QPen(text_color, 2.0))
+        painter.drawLine(btn.left() + 6, btn.center().y(), btn.right() - 6, btn.center().y())
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and self._button_rect().contains(event.pos()):
+            if self.editor is not None and hasattr(self.editor, 'collapse_inline_subgraph'):
+                self.editor.collapse_inline_subgraph(self.container_node_id)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class NodeItem(QtWidgets.QGraphicsItem):
     def __init__(self, node_data: TestNodeData, inputs=None, outputs=None):
         super().__init__()
@@ -524,14 +595,14 @@ class NodeItem(QtWidgets.QGraphicsItem):
         self.inputs = []
         self.outputs = []
 
-        self.input_names = inputs or ["In"]
-        self.output_names = outputs or ["Out"]
+        # Empty lists are meaningful for data-only nodes. Do not fall back to
+        # execution-style ports unless the caller omitted the interface entirely.
+        self.input_names = ["In"] if inputs is None else list(inputs)
+        self.output_names = ["Out"] if outputs is None else list(outputs)
 
         self.width = NODE_WIDTH
-        self.height = max(
-            100,
-            TITLE_HEIGHT + 40 + max(len(self.input_names), len(self.output_names)) * PORT_SPACING
-        )
+        self.height = 100
+        self._recalculate_size()
 
         self.setFlags(
             QtWidgets.QGraphicsItem.ItemIsMovable |
@@ -541,6 +612,8 @@ class NodeItem(QtWidgets.QGraphicsItem):
         self.setCacheMode(QtWidgets.QGraphicsItem.DeviceCoordinateCache)
 
         self._drag_start_pos = None
+        self._drag_press_scene_pos = None
+        self._drag_group_start_positions = {}
         self.execution_state = 'normal'
         self.execution_note = ''
         self.breakpoint_enabled = bool((self.node_data.properties or {}).get('__runtime_breakpoint', False))
@@ -560,6 +633,102 @@ class NodeItem(QtWidgets.QGraphicsItem):
                 port.definition_port = output_definitions[i]
             self.outputs.append(port)
 
+
+    def _text_width(self, text, bold=False):
+        font = QtWidgets.QApplication.font()
+        font.setBold(bool(bold))
+        metrics = QtGui.QFontMetrics(font)
+        return metrics.horizontalAdvance(str(text or ""))
+
+    def _recalculate_size(self):
+        title_width = self._text_width(self.title, bold=True) + 64
+        left_width = max([self._text_width(name) for name in self.input_names], default=0)
+        right_width = max([self._text_width(name) for name in self.output_names], default=0)
+
+        if self.input_names and self.output_names:
+            port_width = 34 + left_width + 24 + right_width + 34
+        elif self.output_names:
+            port_width = 42 + right_width + 34
+        elif self.input_names:
+            port_width = 34 + left_width + 42
+        else:
+            port_width = 120
+
+        self.width = float(max(NODE_WIDTH, title_width, port_width))
+        row_count = max(len(self.input_names), len(self.output_names))
+        self.height = float(max(72 if row_count == 0 else 100, TITLE_HEIGHT + 40 + row_count * PORT_SPACING))
+
+    def _reposition_ports(self):
+        for port in list(self.inputs) + list(self.outputs):
+            port._reposition()
+            for conn in list(getattr(port, "connections", [])):
+                conn.update_path()
+
+    def _make_dynamic_definition_port(self, name, direction, data_type='any', connection_kind='data'):
+        try:
+            from .definitions import NodePortDefinition
+            return NodePortDefinition(
+                id=str(name).strip().lower().replace(' ', '_') or 'port',
+                name=str(name),
+                direction=direction,
+                data_type=data_type,
+                connection_kind=connection_kind,
+                multi_connection=True if direction == 'output' else False,
+            )
+        except Exception:
+            return None
+
+    def rebuild_ports(self, inputs=None, outputs=None):
+        """Rebuild visual ports after a dynamic node changes its interface."""
+        scene = self.scene()
+        old_ports = list(self.inputs) + list(self.outputs)
+        for port in old_ports:
+            for conn in list(getattr(port, 'connections', [])):
+                try:
+                    if scene is not None:
+                        scene.removeItem(conn)
+                    conn.remove_from_ports()
+                except Exception:
+                    pass
+            try:
+                port.setParentItem(None)
+                if scene is not None:
+                    scene.removeItem(port)
+            except Exception:
+                pass
+
+        self.inputs = []
+        self.outputs = []
+        self.input_names = list(inputs or [])
+        self.output_names = list(outputs or [])
+
+        definition = self.definition
+        input_definitions = list(definition.inputs) if definition is not None else []
+        output_definitions = list(definition.outputs) if definition is not None else []
+
+        for i, name in enumerate(self.input_names):
+            port = PortItem(self, name, "input", i)
+            if i < len(input_definitions):
+                port.definition_port = input_definitions[i]
+            else:
+                port.definition_port = self._make_dynamic_definition_port(name, 'input', 'any', 'data')
+            self.inputs.append(port)
+
+        for i, name in enumerate(self.output_names):
+            port = PortItem(self, name, "output", i)
+            if i < len(output_definitions):
+                port.definition_port = output_definitions[i]
+            else:
+                port.definition_port = self._make_dynamic_definition_port(name, 'output', 'any', 'data')
+            self.outputs.append(port)
+
+        self.prepareGeometryChange()
+        self._recalculate_size()
+        self._reposition_ports()
+        self.update()
+        if scene is not None and hasattr(scene, "ensure_logical_scene_rect"):
+            scene.ensure_logical_scene_rect(self.sceneBoundingRect())
+
     @property
     def definition(self):
         return node_definition_for_type(self.node_data.node_type)
@@ -575,6 +744,14 @@ class NodeItem(QtWidgets.QGraphicsItem):
 
     def boundingRect(self):
         return QtCore.QRectF(0, 0, self.width, self.height)
+
+    def is_subgraph_container(self):
+        definition = self.definition
+        metadata = getattr(definition, 'metadata', {}) if definition is not None else {}
+        return bool(metadata.get('is_subgraph_container') or self.node_data.node_type == 'flow.subgraph_container')
+
+    def _inline_expand_button_rect(self):
+        return QtCore.QRectF(self.width - 28, 5, 22, 22)
 
     def set_execution_state(self, state='normal', note=''):
         state = str(state or 'normal')
@@ -624,10 +801,19 @@ class NodeItem(QtWidgets.QGraphicsItem):
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(
-            title_rect.adjusted(10, 0, -10, 0),
+            title_rect.adjusted(10, 0, -36, 0),
             QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft,
             self.title
         )
+
+        if self.is_subgraph_container() and not getattr(self, '_inline_subgraph_display', False):
+            btn = self._inline_expand_button_rect()
+            painter.setPen(QtGui.QPen(text_color, 1.3))
+            painter.setBrush(QtGui.QBrush(body_color.lighter(120)))
+            painter.drawRoundedRect(btn, 5, 5)
+            painter.setPen(QtGui.QPen(text_color, 2.0))
+            painter.drawLine(btn.left() + 6, btn.center().y(), btn.right() - 6, btn.center().y())
+            painter.drawLine(btn.center().x(), btn.top() + 6, btn.center().x(), btn.bottom() - 6)
 
         font.setBold(False)
         painter.setFont(font)
@@ -642,8 +828,9 @@ class NodeItem(QtWidgets.QGraphicsItem):
 
         for port in self.outputs:
             y = port.y()
+            label_rect = QtCore.QRectF(14, y - 10, self.width - 28, 20) if not self.inputs else QtCore.QRectF(self.width - 124, y - 10, 110, 20)
             painter.drawText(
-                QtCore.QRectF(self.width - 84, y - 10, 70, 20),
+                label_rect,
                 QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
                 port.name
             )
@@ -659,26 +846,78 @@ class NodeItem(QtWidgets.QGraphicsItem):
             painter.drawEllipse(inner_rect)
 
     def mousePressEvent(self, event):
+        if (event.button() == QtCore.Qt.LeftButton and self.is_subgraph_container()
+                and not getattr(self, '_inline_subgraph_display', False)
+                and self._inline_expand_button_rect().contains(event.pos())):
+            scene = self.scene()
+            views = scene.views() if scene is not None else []
+            editor = getattr(views[0], 'editor', None) if views else None
+            if editor is not None and hasattr(editor, 'toggle_inline_subgraph_node'):
+                editor.toggle_inline_subgraph_node(self)
+                event.accept()
+                return
         if event.button() == QtCore.Qt.LeftButton:
+            scene = self.scene()
+            if scene is not None and not self.isSelected() and not (event.modifiers() & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)):
+                scene.clearSelection()
+                self.setSelected(True)
+            selected_nodes = []
+            if scene is not None:
+                selected_nodes = [item for item in scene.selectedItems() if isinstance(item, NodeItem)]
+            if self not in selected_nodes:
+                selected_nodes.append(self)
             self._drag_start_pos = QtCore.QPointF(self.pos())
+            self._drag_press_scene_pos = QtCore.QPointF(event.scenePos())
+            self._drag_group_start_positions = {node: QtCore.QPointF(node.pos()) for node in selected_nodes}
+            event.accept()
+            return
         super().mousePressEvent(event)
 
-    def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
+    def mouseMoveEvent(self, event):
+        if (event.buttons() & QtCore.Qt.LeftButton) and self._drag_press_scene_pos is not None:
+            delta = QtCore.QPointF(event.scenePos() - self._drag_press_scene_pos)
+            for node, start_pos in list(self._drag_group_start_positions.items()):
+                try:
+                    node.setPos(start_pos + delta)
+                except RuntimeError:
+                    pass
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
 
+    def mouseReleaseEvent(self, event):
         if event.button() != QtCore.Qt.LeftButton:
+            super().mouseReleaseEvent(event)
             return
 
         scene = self.scene()
-        if scene is None or getattr(scene, "_suspend_undo", False):
-            self._drag_start_pos = None
-            return
-
-        if self._drag_start_pos is not None and self.pos() != self._drag_start_pos:
-            if scene.undo_stack is not None:
-                scene.handle_node_moved(self, self._drag_start_pos, QtCore.QPointF(self.pos()))
+        moved_nodes = []
+        if scene is not None and not getattr(scene, "_suspend_undo", False):
+            for node, old_pos in list(self._drag_group_start_positions.items()):
+                try:
+                    new_pos = QtCore.QPointF(node.pos())
+                except RuntimeError:
+                    continue
+                if new_pos != old_pos:
+                    moved_nodes.append((node, old_pos, new_pos))
 
         self._drag_start_pos = None
+        self._drag_press_scene_pos = None
+        self._drag_group_start_positions = {}
+
+        if moved_nodes and scene is not None and scene.undo_stack is not None:
+            if len(moved_nodes) > 1:
+                scene.undo_stack.beginMacro("Move Nodes")
+            try:
+                for node, old_pos, new_pos in moved_nodes:
+                    scene.handle_node_moved(node, old_pos, new_pos)
+            finally:
+                if len(moved_nodes) > 1:
+                    scene.undo_stack.endMacro()
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
 
     def itemChange(self, change, value):
         if change == QtWidgets.QGraphicsItem.ItemPositionChange:

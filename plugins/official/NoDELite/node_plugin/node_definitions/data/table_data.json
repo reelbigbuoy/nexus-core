@@ -1,0 +1,17 @@
+{
+  "type_id": "table.table_data",
+  "name": "Table Data",
+  "category": "Data",
+  "description": "Data-only table node. Columns dynamically become data output ports and table contents can be edited or imported from CSV.",
+  "inputs": [],
+  "outputs": [],
+  "properties": [
+    {"name": "columns", "label": "Columns", "property_type": "table_columns", "default": []},
+    {"name": "rows", "label": "Rows", "property_type": "table_rows", "default": []},
+    {"name": "source_csv", "label": "Source CSV", "property_type": "string", "default": ""}
+  ],
+  "defaults": {"columns": [], "rows": [], "source_csv": ""},
+  "visual": {"color": "#2f9e44", "icon": "table"},
+  "tags": ["table", "csv", "data", "dataset"],
+  "metadata": {"node_kind": "data", "data_only": true, "dynamic_output_ports_from": "columns"}
+}

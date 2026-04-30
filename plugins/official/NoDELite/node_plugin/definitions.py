@@ -10,6 +10,7 @@
 # ============================================================================
 
 import json
+import copy
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,8 +81,8 @@ class NodeDefinition:
         return self.name
 
     def default_properties(self):
-        merged = {prop.name: prop.default for prop in self.properties}
-        merged.update(self.defaults)
+        merged = {prop.name: copy.deepcopy(prop.default) for prop in self.properties}
+        merged.update(copy.deepcopy(self.defaults))
         return merged
 
     def create_node_entry(self, pos=None, node_id=None, title=None, properties=None):

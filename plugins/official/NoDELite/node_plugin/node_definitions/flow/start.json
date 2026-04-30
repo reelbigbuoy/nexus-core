@@ -1,0 +1,13 @@
+{
+  "type_id": "flow.start",
+  "name": "Start",
+  "category": "Flow",
+  "description": "Control-flow entry point for a graph or sub-graph. Incoming container execution enters here when this graph is used as a sub-graph.",
+  "inputs": [],
+  "outputs": [
+    {"id": "exec_out", "name": "Exec Out", "direction": "output", "data_type": "exec", "connection_kind": "exec", "multi_connection": false, "required": false}
+  ],
+  "visual": {"color": "#2f80ed", "icon": "start"},
+  "tags": ["control-flow", "entry", "start", "subgraph"],
+  "metadata": {"control_flow_boundary": "start", "graph_boundary": "entry"}
+}
