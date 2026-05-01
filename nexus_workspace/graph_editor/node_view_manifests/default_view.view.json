@@ -1,0 +1,47 @@
+{
+  "view_id": "default_view",
+  "name": "Default",
+  "description": "Default View",
+  "include_categories": [
+    "Data",
+    "Flow"
+  ],
+  "include_type_ids": [
+    "test_entry_node",
+    "stage_node",
+    "test_entry_node_2",
+    "tom_node",
+    "flow.start",
+    "flow.end",
+    "flow.subgraph_container",
+    "table.table_data"
+  ],
+  "exclude_categories": [],
+  "exclude_type_ids": [],
+  "include_source_subdirs": [],
+  "is_default": true,
+  "rules": {
+    "allow_cycles": true,
+    "allow_self_connections": false,
+    "enforce_data_type_compatibility": false,
+    "cycle_checked_connection_kinds": [
+      "exec"
+    ],
+    "max_nodes_per_type": {
+      "flow.start": 1,
+      "flow.end": 1
+    }
+  },
+  "connection_styles": {
+    "data": {
+      "color_role": "connection_data",
+      "width": 2.0,
+      "pen_style": "solid"
+    },
+    "exec": {
+      "color_role": "connection_exec",
+      "width": 2.5,
+      "pen_style": "solid"
+    }
+  }
+}

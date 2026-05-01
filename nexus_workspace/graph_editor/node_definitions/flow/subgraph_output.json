@@ -1,0 +1,13 @@
+{
+  "type_id": "flow.subgraph_output",
+  "name": "Sub-Graph Output",
+  "category": "Flow",
+  "description": "Boundary input for a nested sub-graph. Connect terminal executable nodes to this boundary.",
+  "inputs": [
+    {"id": "exec_in", "name": "Exec In", "direction": "input", "data_type": "exec", "connection_kind": "exec"}
+  ],
+  "outputs": [],
+  "visual": {"color": "#27ae60", "icon": "exit"},
+  "tags": ["subgraph", "boundary", "output", "exit"],
+  "metadata": {"subgraph_boundary": "output", "deprecated": true, "replaced_by": "flow.end"}
+}

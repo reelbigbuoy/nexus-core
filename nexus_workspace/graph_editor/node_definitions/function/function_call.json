@@ -1,0 +1,72 @@
+{
+  "type_id": "function.call",
+  "name": "Call Function",
+  "category": "Function",
+  "description": "Invokes a named function with optional arguments.",
+  "inputs": [
+    {
+      "id": "exec_in",
+      "name": "Exec In",
+      "direction": "input",
+      "data_type": "exec",
+      "connection_kind": "exec"
+    },
+    {
+      "id": "arg1",
+      "name": "Arg 1",
+      "direction": "input",
+      "data_type": "any",
+      "required": false,
+      "connection_kind": "data"
+    },
+    {
+      "id": "arg2",
+      "name": "Arg 2",
+      "direction": "input",
+      "data_type": "any",
+      "required": false,
+      "connection_kind": "data"
+    }
+  ],
+  "outputs": [
+    {
+      "id": "next",
+      "name": "Next",
+      "direction": "output",
+      "data_type": "exec",
+      "connection_kind": "exec"
+    },
+    {
+      "id": "result",
+      "name": "Result",
+      "direction": "output",
+      "data_type": "any",
+      "connection_kind": "data"
+    }
+  ],
+  "properties": [
+    {
+      "name": "name",
+      "label": "Name",
+      "property_type": "string",
+      "default": "my_function"
+    }
+  ],
+  "defaults": {
+    "name": "my_function"
+  },
+  "tags": [
+    "function",
+    "invoke"
+  ],
+  "metadata": {
+    "domain": "programming",
+    "semantic_kind": "function_call",
+    "ir_kind": "function_call",
+    "supported_targets": [
+      "python",
+      "cpp",
+      "java"
+    ]
+  }
+}

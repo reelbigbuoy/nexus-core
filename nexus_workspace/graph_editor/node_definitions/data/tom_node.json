@@ -1,0 +1,38 @@
+{
+  "type_id": "tom_node",
+  "name": "tom",
+  "category": "Data",
+  "description": "",
+  "inputs": [
+    {
+      "id": "in",
+      "name": "In",
+      "direction": "input",
+      "data_type": "exec",
+      "connection_kind": "exec",
+      "multi_connection": false,
+      "required": false
+    }
+  ],
+  "outputs": [
+    {
+      "id": "out",
+      "name": "Out",
+      "direction": "output",
+      "data_type": "exec",
+      "connection_kind": "exec",
+      "multi_connection": false,
+      "required": false
+    }
+  ],
+  "properties": [],
+  "defaults": {},
+  "metadata": {
+    "generated_by": "NoDEViewBuilder",
+    "node_kind": "execution",
+    "node_data_type": ""
+  },
+  "visual": {
+    "compact": false
+  }
+}

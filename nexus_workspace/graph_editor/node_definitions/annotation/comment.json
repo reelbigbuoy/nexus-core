@@ -1,0 +1,30 @@
+{
+  "type_id": "annotation.comment",
+  "name": "Comment",
+  "category": "Annotation",
+  "description": "Non-semantic author note for graph documentation.",
+  "inputs": [],
+  "outputs": [],
+  "properties": [
+    {
+      "name": "text",
+      "label": "Comment",
+      "property_type": "string",
+      "default": "",
+      "multiline": true
+    }
+  ],
+  "defaults": {
+    "text": ""
+  },
+  "tags": [
+    "note",
+    "documentation"
+  ],
+  "metadata": {
+    "domain": "common",
+    "semantic_kind": "comment",
+    "ir_kind": "comment",
+    "supported_targets": []
+  }
+}

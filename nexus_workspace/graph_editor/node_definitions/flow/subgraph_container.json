@@ -1,0 +1,20 @@
+{
+  "type_id": "flow.subgraph_container",
+  "name": "Sub-Graph Container",
+  "category": "Flow",
+  "description": "Container node that opens a nested NoDE-Lite sub-graph. Exec links attach to the top-level in/out ports.",
+  "inputs": [
+    {"id": "exec_in", "name": "Exec In", "direction": "input", "data_type": "exec", "connection_kind": "exec"}
+  ],
+  "outputs": [
+    {"id": "exec_out", "name": "Exec Out", "direction": "output", "data_type": "exec", "connection_kind": "exec"}
+  ],
+  "properties": [
+    {"name": "graph_name", "label": "Sub-Graph Name", "property_type": "string", "default": "Sub-Graph"},
+    {"name": "notes", "label": "Notes", "property_type": "string", "default": "", "multiline": true}
+  ],
+  "visual": {"color": "#6f42c1", "icon": "subgraph"},
+  "tags": ["subgraph", "container", "function", "flow"],
+  "defaults": {"subgraph": {}},
+  "metadata": {"is_subgraph_container": true, "opens_subgraph": true}
+}
