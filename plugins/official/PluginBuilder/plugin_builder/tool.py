@@ -455,7 +455,6 @@ class DesignerSurface(NexusFrame):
         global_pos = self.mapToGlobal(local_pos)
         target_item, zone = self._update_dock_preview(global_pos)
         parent_node = self.builder.nodes[ROOT_UID]
-        drop_pos = local_pos
         if target_item is not None and target_item.can_host_children():
             parent_node = target_item.node
             drop_pos = target_item.child_host.mapFromGlobal(global_pos)

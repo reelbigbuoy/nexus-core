@@ -71,30 +71,38 @@ else:
     _BarCategoryAxis = None
 
 
-class NexusChartView(_ChartViewBase):
-    """Base chart view wrapper for Nexus chart surfaces."""
+if _QtChartModule is None:
+    class NexusChartView(_ChartFallback):
+        """Base chart view wrapper for Nexus chart surfaces."""
 
-    def __init__(self, parent=None, *, object_name='NexusChartView', title=''):
-        if _QtChartModule is None:
+        def __init__(self, parent=None, *, object_name='NexusChartView', title=''):
             super().__init__(parent, object_name=object_name)
             self.set_message('Qt chart support is not available in this runtime.')
-            return
-        chart = _Chart()
-        chart.setTitle(str(title or ''))
-        super().__init__(chart, parent)
-        self.setObjectName(object_name)
-        from PyQt5 import QtGui
-        self.setRenderHint(QtGui.QPainter.Antialiasing)
 
-    def chart_object(self):
-        if _QtChartModule is None:
+        def chart_object(self):
             return None
-        return self.chart()
 
-    def set_chart_title(self, title: str):
-        chart = self.chart_object()
-        if chart is not None:
+        def set_chart_title(self, title: str):
+            return
+else:
+    class NexusChartView(_ChartViewBase):
+        """Base chart view wrapper for Nexus chart surfaces."""
+
+        def __init__(self, parent=None, *, object_name='NexusChartView', title=''):
+            chart = _Chart()
             chart.setTitle(str(title or ''))
+            super().__init__(chart, parent)
+            self.setObjectName(object_name)
+            from PyQt5 import QtGui
+            self.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        def chart_object(self):
+            return self.chart()
+
+        def set_chart_title(self, title: str):
+            chart = self.chart_object()
+            if chart is not None:
+                chart.setTitle(str(title or ''))
 
 
 class NexusBarChartView(NexusChartView):
