@@ -15,7 +15,7 @@ from .definitions import NODE_REGISTRY, NodeDefinitionRegistry
 from .graphics_items import NodeItem, ConnectionItem, PortItem, ConnectionPinItem, InlineSubgraphBoundaryItem, _distance_to_segment
 from .commands import AddNodeCommand, AddConnectionCommand
 from .authoring import PaletteUsageStore
-from .geometry import qpoint, qrect, px
+from .geometry import qpoint, qrect
 
 
 class NodePalettePopup(QtWidgets.QDialog):

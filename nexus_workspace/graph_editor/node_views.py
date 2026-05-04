@@ -379,7 +379,6 @@ def _filter_definitions(definitions: Iterable[NodeDefinition], view_definition: 
     return filtered
 
 
-from .definitions import NODE_REGISTRY
 
 NODE_VIEW_REGISTRY = NodeViewRegistry()
 NODE_VIEW_MANIFESTS_DIR = Path(__file__).resolve().parent / "node_view_manifests"

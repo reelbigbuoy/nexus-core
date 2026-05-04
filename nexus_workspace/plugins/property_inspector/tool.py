@@ -20,8 +20,6 @@
 # Description: Implements the bundled property inspector tool for editing inspectable properties.
 #============================================================================
 
-from nexus_workspace.framework.qt import QtCore
-
 from ...core.serialization import NexusSerializable
 from ...core.selection_contract import SELECTION_CURRENT_KEY, normalize_selection_payload
 from ...core.inspectable_contract import normalize_inspectable_object

@@ -21,7 +21,7 @@
 # ============================================================================
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 from nexus_workspace.framework.qt import QtCore
 

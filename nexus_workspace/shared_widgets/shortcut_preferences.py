@@ -23,7 +23,7 @@
 from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 from ..framework.controls import NexusTableWidget
-from ..framework.forms import NexusForm, NexusInspectorSection, NexusSearchBar
+from ..framework.forms import NexusInspectorSection, NexusSearchBar
 from ..framework.windowing import NexusDialogBase
 
 

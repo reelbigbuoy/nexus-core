@@ -21,7 +21,6 @@
 #============================================================================
 
 import json
-from pathlib import Path
 
 from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 

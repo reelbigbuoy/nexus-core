@@ -1440,7 +1440,8 @@ class NexusTableWidget(QtWidgets.QTableWidget, NexusWidgetMixin):
 
     def contextMenuEvent(self, event):
         if not self._nexus_table_capabilities.get("context_menu", True):
-            return super().contextMenuEvent(event)
+            super().contextMenuEvent(event)
+            return None
         menu = QtWidgets.QMenu(self)
         menu.addAction("Undo", self.undo_table).setEnabled(bool(self._table_undo_stack))
         menu.addAction("Redo", self.redo_table).setEnabled(bool(self._table_redo_stack))
@@ -1469,6 +1470,7 @@ class NexusTableWidget(QtWidgets.QTableWidget, NexusWidgetMixin):
             menu.addAction("Filter Column...", self.filter_current_column)
             menu.addAction("Clear Filters", self.clear_filters).setEnabled(bool(self._hidden_rows_by_filter))
         menu.exec_(event.globalPos())
+        return None
 
     def set_headers(self, headers):
         self._bulk_table_mutation = True
@@ -1647,7 +1649,8 @@ class NexusTextEditor(QtWidgets.QPlainTextEdit, NexusWidgetMixin):
     def contextMenuEvent(self, event):
         caps = getattr(self, "_nexus_text_capabilities", {}) or {}
         if not caps.get("context_menu", True):
-            return super().contextMenuEvent(event)
+            super().contextMenuEvent(event)
+            return None
         menu = self.createStandardContextMenu()
         if not caps.get("clipboard", True):
             for action in menu.actions():
@@ -1662,6 +1665,7 @@ class NexusTextEditor(QtWidgets.QPlainTextEdit, NexusWidgetMixin):
             menu.addAction("Align Center", lambda: self.set_text_alignment("Center"))
             menu.addAction("Align Right", lambda: self.set_text_alignment("Right"))
         menu.exec_(event.globalPos())
+        return None
 
 
 class NexusProgressBar(QtWidgets.QProgressBar, NexusWidgetMixin):

@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import Iterable, Sequence
 import json
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtWidgets
 
 from nexus_workspace.framework.controls import NexusSection
 from nexus_workspace.framework.tools import NexusToolBase

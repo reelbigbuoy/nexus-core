@@ -14,7 +14,6 @@ from nexus_workspace.core.themes import THEMES
 from .constants import NODE_WIDTH, TITLE_HEIGHT, PORT_RADIUS, PORT_SPACING, NODE_CORNER_RADIUS, GRID_SIZE
 from .definitions import TestNodeData, node_definition_for_type
 from .models import GraphConnectionData
-from .geometry import qrect, qpoint, px
 
 
 def _pen_style_from_name(name):
