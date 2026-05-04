@@ -146,6 +146,7 @@ class PluginManager:
     def plugin_records(self) -> List[dict]:
         return [self._plugin_records[key] for key in sorted(self._plugin_records.keys())]
 
+    def registry_snapshot(self) -> dict:
         manifests = self.plugin_manifests()
         tools = []
         for descriptor in self.tool_descriptors():
@@ -180,5 +181,6 @@ class PluginManager:
         try:
             data_store.set('platform.plugins', self.plugin_manifests())
             data_store.set('platform.plugin_records', self.plugin_records())
+            data_store.set('platform.plugin_registry', self.registry_snapshot())
         except Exception:
             pass

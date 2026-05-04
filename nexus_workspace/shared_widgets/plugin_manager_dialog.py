@@ -50,7 +50,6 @@ class BadgeItemDelegate(QtWidgets.QStyledItemDelegate):
             'platform': QtWidgets.QStyle.SP_MessageBoxInformation,
             'first_party': QtWidgets.QStyle.SP_DialogApplyButton,
             'official': QtWidgets.QStyle.SP_DialogApplyButton,
-            'official': QtWidgets.QStyle.SP_DialogApplyButton,
             'builtin': QtWidgets.QStyle.SP_TitleBarMenuButton,
             'bundled': QtWidgets.QStyle.SP_DirIcon,
             'organization': QtWidgets.QStyle.SP_FileDialogDetailedView,
@@ -127,7 +126,6 @@ class PluginManagerDialog(NexusDialogBase):
     BADGE_STYLES = {
         'platform': ('Platform', '#2d4f85', '#ffffff', 'platform'),
         'first_party': ('First Party', '#1f6f50', '#ffffff', 'first_party'),
-        'official': ('Reel Big Buoy', '#1f6f50', '#ffffff', 'official'),
         'official': ('Official', '#1f6f50', '#ffffff', 'official'),
         'builtin': ('Built-in', '#2d4f85', '#ffffff', 'builtin'),
         'bundled': ('Bundled', '#465268', '#ffffff', 'bundled'),
