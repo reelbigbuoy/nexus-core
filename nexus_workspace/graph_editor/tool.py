@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from nexus_workspace.framework.controls import NexusTableEditor
-from .geometry import px, qpoint, qrect
+from .geometry import px
 from nexus_workspace.core.serialization import NexusSerializable
 from nexus_workspace.core.themes import build_stylesheet, get_theme_colors
 from nexus_workspace.core.selection_contract import SELECTION_CURRENT_CONTRACT, SelectionPublisher
@@ -30,7 +30,7 @@ from .definitions import NODE_REGISTRY, NODE_DEFINITIONS_DIR, load_external_node
 from .node_views import NODE_VIEW_MANIFESTS_DIR, NODE_VIEW_REGISTRY, NodeViewSession, NodeViewRules, load_node_views
 from .graphics_items import NodeItem, ConnectionItem, ConnectionPinItem, InlineSubgraphBoundaryItem
 from .graph_integrity import GraphIdRewriter, graph_json_safe
-from .authoring import GraphCommandDescriptor, GRAPH_COMMAND_REGISTRY, SelectionManager
+from .authoring import GraphCommandDescriptor, GRAPH_COMMAND_REGISTRY
 from .templates import GraphTemplateService
 from .validation import GraphValidationEngine
 
@@ -3540,7 +3540,6 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._refresh_definition_watch_paths()
 
     def _iter_definition_watch_paths(self):
-        paths = []
         seen = set()
         for root_str in list(self._definition_watch_roots or []):
             root = Path(root_str)

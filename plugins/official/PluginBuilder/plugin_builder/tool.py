@@ -1122,7 +1122,6 @@ class PluginBuilderWorkbench(QtWidgets.QWidget):
 
     def _paste_payload(self, payload, parent_uid, pos=None):
         raw = copy.deepcopy(payload["node"])
-        old_uid = raw["uid"]
         new_uid = self._next_uid()
         raw["uid"] = new_uid
         raw["children"] = []
@@ -2718,7 +2717,6 @@ class PluginBuilderWorkbench(QtWidgets.QWidget):
     def _designer_container_style(self):
         pal = self.palette()
         base = pal.color(QtGui.QPalette.Base).name()
-        alt = pal.color(QtGui.QPalette.AlternateBase).name()
         mid = pal.color(QtGui.QPalette.Mid).name()
         text = pal.color(QtGui.QPalette.Text).name()
         return f"background:{base}; border:1px solid {mid}; border-radius:10px; color:{text};"

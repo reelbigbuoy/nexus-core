@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Iterable, Sequence, Tuple
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtWidgets
 
 try:
     from PyQt5 import QtChart as _QtChartModule
@@ -91,7 +91,11 @@ else:
         def __init__(self, parent=None, *, object_name='NexusChartView', title=''):
             chart = _Chart()
             chart.setTitle(str(title or ''))
-            super().__init__(chart, parent)
+            # PyQt5/PyQtChart builds expose slightly different QChartView constructor overloads.
+            # Initialize with the parent first, then attach the chart explicitly to avoid
+            # runtime TypeError on builds that do not support QChartView(chart, parent).
+            super().__init__(parent)
+            self.setChart(chart)
             self.setObjectName(object_name)
             from PyQt5 import QtGui
             self.setRenderHint(QtGui.QPainter.Antialiasing)
