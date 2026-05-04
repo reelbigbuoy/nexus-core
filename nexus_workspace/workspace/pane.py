@@ -188,13 +188,16 @@ class WorkspacePane(QtWidgets.QFrame):
         self.manager.update_tool_title(tool_id, title)
 
         setattr(tool, '_nexus_instance_name', title)
-        if hasattr(tool, 'setWindowTitle'):
-            tool.setWindowTitle(title)
-        if hasattr(tool, 'titleChanged'):
-            try:
-                tool.titleChanged.emit(title)
-            except Exception:
-                pass
+        if hasattr(tool, 'set_editor_title'):
+            tool.set_editor_title(title)
+        else:
+            if hasattr(tool, 'setWindowTitle'):
+                tool.setWindowTitle(title)
+            if hasattr(tool, 'titleChanged'):
+                try:
+                    tool.titleChanged.emit(title)
+                except Exception:
+                    pass
 
         self._sync_window_title()
 

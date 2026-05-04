@@ -37,8 +37,25 @@ class GraphScene(QtWidgets.QGraphicsScene):
         self._suspend_undo = False
         self._highlighted_ports = set()
         self._scene_margin = 2000.0
+        self._selection_order = []
+        self.selectionChanged.connect(self._track_selection_order)
         self.setItemIndexMethod(QtWidgets.QGraphicsScene.BspTreeIndex)
         self.setSceneRect(-5000, -5000, 10000, 10000)
+
+    def _track_selection_order(self):
+        selected = [item for item in self.selectedItems() if item.isVisible()]
+        self._selection_order = [item for item in self._selection_order if item in selected]
+        for item in selected:
+            if item not in self._selection_order:
+                self._selection_order.append(item)
+
+    def ordered_selected_items(self):
+        selected = [item for item in self.selectedItems() if item.isVisible()]
+        ordered = [item for item in self._selection_order if item in selected]
+        for item in selected:
+            if item not in ordered:
+                ordered.append(item)
+        return ordered
 
     def ensure_logical_scene_rect(self, extra_rect=None):
         current = self.sceneRect()
@@ -91,6 +108,18 @@ class GraphScene(QtWidgets.QGraphicsScene):
             item.update()
         self.update()
 
+
+    def _editor(self):
+        try:
+            return getattr(self.views()[0], 'editor', None) if self.views() else None
+        except Exception:
+            return None
+
+    def _notify_graph_changed(self):
+        editor = self._editor()
+        if editor is not None and hasattr(editor, 'schedule_validation_update'):
+            editor.schedule_validation_update()
+
     def drawBackground(self, painter, rect):
         super().drawBackground(painter, rect)
         painter.fillRect(rect, QtGui.QColor(self.theme["grid_bg"]))
@@ -130,6 +159,7 @@ class GraphScene(QtWidgets.QGraphicsScene):
         self.addItem(node)
         node.setPos(QtCore.QPointF(node_data.x, node_data.y))
         self.ensure_logical_scene_rect(node.sceneBoundingRect())
+        self._notify_graph_changed()
         return node
 
     def add_node_from_entry(self, node_entry, select_new=False):
@@ -186,6 +216,41 @@ class GraphScene(QtWidgets.QGraphicsScene):
         # handles therefore need a second sync pass after the item has actually been
         # inserted into the scene so restored/undone connections re-create their bend
         # points visually as well as logically.
+        conn.update_path()
+        conn.sync_pin_items()
+        conn.refresh_style()
+        self.ensure_logical_scene_rect(conn.sceneBoundingRect())
+        self._notify_graph_changed()
+        return conn
+
+
+    def create_projection_connection(self, source_port, target_port, route_points=None, connection_kind=None):
+        """Create a render-only connection used by inline expanded subgraphs.
+
+        Projection wires are not graph-model connections. They do not register
+        with port connection lists, are not selectable, are skipped by
+        serialization, and bypass single-input connection limits so the hidden
+        real parent/container wire can coexist with the visual bridge.
+        """
+        if source_port is None or target_port is None:
+            return None
+        if connection_kind is None:
+            try:
+                editor = getattr(self.views()[0], "editor", None) if self.views() else None
+                if editor is not None and hasattr(editor, "_connection_kind_for_ports"):
+                    connection_kind = editor._connection_kind_for_ports(source_port, target_port)
+            except Exception:
+                connection_kind = None
+        conn = ConnectionItem(
+            source_port=source_port,
+            target_port=target_port,
+            route_points=route_points or [],
+            connection_kind=connection_kind,
+            register_with_ports=False,
+            projection_mode=True,
+        )
+        conn._inline_subgraph_display = True
+        self.addItem(conn)
         conn.update_path()
         conn.sync_pin_items()
         conn.refresh_style()
@@ -278,8 +343,34 @@ class GraphScene(QtWidgets.QGraphicsScene):
             return True
         return source_type == target_type
 
+    def _input_port_allows_another_connection(self, target_port, connection_to_ignore=None):
+        if target_port is None or target_port.port_type != PortItem.INPUT:
+            return True
+        definition_port = getattr(target_port, "definition_port", None)
+        if bool(getattr(definition_port, "multi_connection", False)):
+            return True
+        for connection in list(getattr(target_port, "connections", []) or []):
+            if connection_to_ignore is not None and connection is connection_to_ignore:
+                continue
+            return False
+        return True
+
+    def _port_belongs_to_inline_projection(self, port):
+        node = getattr(port, 'parent_node', None)
+        return bool(getattr(node, '_inline_subgraph_display', False))
+
     def _editor_allows_connection(self, source_port, target_port, connection_to_ignore=None):
+        # Inline-expanded subgraphs are read-only visual projections. The editor
+        # may create temporary preview/bridge wires while expanding a container,
+        # but users must not create or reconnect real parent-canvas wires directly
+        # to cloned child ports. Real edits happen by opening the subgraph.
+        if (self._port_belongs_to_inline_projection(source_port) or
+                self._port_belongs_to_inline_projection(target_port)):
+            if not bool(getattr(self, '_allow_inline_preview_connections', False)):
+                return False
         if not self._local_data_ports_compatible(source_port, target_port):
+            return False
+        if not self._input_port_allows_another_connection(target_port, connection_to_ignore=connection_to_ignore):
             return False
         views = self.views()
         if not views:
@@ -289,12 +380,25 @@ class GraphScene(QtWidgets.QGraphicsScene):
             return True
         return bool(editor.allows_connection_between_ports(source_port, target_port, connection_to_ignore=connection_to_ignore))
 
+    def _normalized_connection_ports(self, first_port, second_port):
+        """Return (source_output_port, target_input_port) for either drag direction.
+
+        Users can start a wire from an input or an output. The persisted graph
+        model still stores canonical output -> input connections.
+        """
+        if first_port is None or second_port is None:
+            return None, None
+        if first_port.port_type == PortItem.OUTPUT and second_port.port_type == PortItem.INPUT:
+            return first_port, second_port
+        if first_port.port_type == PortItem.INPUT and second_port.port_type == PortItem.OUTPUT:
+            return second_port, first_port
+        return None, None
+
     def _is_valid_connection_target(self, source_port, target_port):
+        normalized_source, normalized_target = self._normalized_connection_ports(source_port, target_port)
         return (
-            source_port is not None and target_port is not None and
-            source_port.port_type == PortItem.OUTPUT and
-            target_port.port_type == PortItem.INPUT and
-            self._editor_allows_connection(source_port, target_port)
+            normalized_source is not None and normalized_target is not None and
+            self._editor_allows_connection(normalized_source, normalized_target)
         )
 
     def _is_valid_reconnect_target(self, connection, endpoint, port):
@@ -325,7 +429,7 @@ class GraphScene(QtWidgets.QGraphicsScene):
         return best_port
 
     def begin_connection_drag(self, source_port: PortItem):
-        if source_port.port_type != PortItem.OUTPUT:
+        if source_port is None or source_port.port_type not in (PortItem.INPUT, PortItem.OUTPUT):
             return
         if getattr(getattr(source_port, 'parent_node', None), '_inline_subgraph_display', False):
             return
@@ -333,11 +437,20 @@ class GraphScene(QtWidgets.QGraphicsScene):
         self.clear_port_feedback()
         self.drag_source_port = source_port
         self.drag_target_port = None
-        self.drag_connection = ConnectionItem(
-            source_port=source_port,
-            temp_end_pos=source_port.scene_center(),
-            preview_mode=True,
-        )
+        preview_kwargs = {
+            'temp_end_pos': source_port.scene_center(),
+            'preview_mode': True,
+            # Preview wires must not register with ports. When a drag starts
+            # from an input port, registering the preview on that input makes
+            # single-input cardinality validation think the port is already
+            # occupied, so input -> output drags incorrectly fail.
+            'register_with_ports': False,
+        }
+        if source_port.port_type == PortItem.OUTPUT:
+            preview_kwargs['source_port'] = source_port
+        else:
+            preview_kwargs['target_port'] = source_port
+        self.drag_connection = ConnectionItem(**preview_kwargs)
         self.addItem(self.drag_connection)
         self.drag_connection.refresh_style()
 
@@ -365,6 +478,12 @@ class GraphScene(QtWidgets.QGraphicsScene):
         self.drag_connection.setVisible(True)
         self.drag_connection.set_route_points([])
         self.drag_connection.setSelected(False)
+        if self.drag_source_port.port_type == PortItem.OUTPUT:
+            self.drag_connection.source_port = self.drag_source_port
+            self.drag_connection.target_port = None
+        else:
+            self.drag_connection.source_port = None
+            self.drag_connection.target_port = self.drag_source_port
         self.drag_connection.temp_end_pos = QtCore.QPointF(drag_pos)
         self.drag_connection.refresh_style()
         self.drag_connection.update_path()
@@ -391,23 +510,27 @@ class GraphScene(QtWidgets.QGraphicsScene):
                     connection_kind = editor._connection_kind_for_ports(self.drag_source_port, chosen_target)
             except Exception:
                 connection_kind = None
-            if not connection_kind:
-                try:
-                    source_def = getattr(self.drag_source_port, "definition_port", None)
-                    target_def = getattr(chosen_target, "definition_port", None)
-                    source_kind = source_def.resolved_connection_kind() if source_def and hasattr(source_def, "resolved_connection_kind") else None
-                    target_kind = target_def.resolved_connection_kind() if target_def and hasattr(target_def, "resolved_connection_kind") else None
-                    connection_kind = source_kind if source_kind == target_kind else None
-                except Exception:
-                    connection_kind = None
-            connection_data = GraphConnectionData(
-                self.drag_source_port.parent_node.node_data.node_id,
-                self.drag_source_port.name,
-                chosen_target.parent_node.node_data.node_id,
-                chosen_target.name,
-                [],
-                connection_kind=connection_kind,
-            ).to_dict()
+            normalized_source, normalized_target = self._normalized_connection_ports(self.drag_source_port, chosen_target)
+            if normalized_source is None or normalized_target is None:
+                connection_data = None
+            else:
+                if not connection_kind:
+                    try:
+                        source_def = getattr(normalized_source, "definition_port", None)
+                        target_def = getattr(normalized_target, "definition_port", None)
+                        source_kind = source_def.resolved_connection_kind() if source_def and hasattr(source_def, "resolved_connection_kind") else None
+                        target_kind = target_def.resolved_connection_kind() if target_def and hasattr(target_def, "resolved_connection_kind") else None
+                        connection_kind = source_kind if source_kind == target_kind else None
+                    except Exception:
+                        connection_kind = None
+                connection_data = GraphConnectionData(
+                    normalized_source.parent_node.node_data.node_id,
+                    normalized_source.name,
+                    normalized_target.parent_node.node_data.node_id,
+                    normalized_target.name,
+                    [],
+                    connection_kind=connection_kind,
+                ).to_dict()
 
         drag_conn.remove_from_ports()
         self.removeItem(drag_conn)
@@ -667,7 +790,7 @@ class GraphScene(QtWidgets.QGraphicsScene):
         identity_key = self._connection_identity_key(conn_entry)
         identity_matches = []
         for item in self.items():
-            if not isinstance(item, ConnectionItem):
+            if not isinstance(item, ConnectionItem) or getattr(item, 'is_projection', False):
                 continue
             data = item.to_dict()
             if data == conn_entry:
@@ -685,6 +808,7 @@ class GraphScene(QtWidgets.QGraphicsScene):
             for pin in list(conn.pin_items):
                 self.removeItem(pin)
             self.removeItem(conn)
+            self._notify_graph_changed()
 
     def remove_node_by_id(self, node_id):
         node = self.find_node_by_id(node_id)
@@ -703,10 +827,11 @@ class GraphScene(QtWidgets.QGraphicsScene):
             self.removeItem(conn)
 
         self.removeItem(node)
+        self._notify_graph_changed()
 
     def snapshot_items_for_delete(self, selected_items):
         node_items = {item for item in selected_items if isinstance(item, NodeItem)}
-        connection_items = {item for item in selected_items if isinstance(item, ConnectionItem)}
+        connection_items = {item for item in selected_items if isinstance(item, ConnectionItem) and not getattr(item, 'is_projection', False)}
 
         for node in node_items:
             for port in node.inputs + node.outputs:
@@ -736,6 +861,52 @@ class GraphScene(QtWidgets.QGraphicsScene):
             "connections": connections,
         }
 
+
+    def clear_path_highlighting(self):
+        for item in self.items():
+            if isinstance(item, NodeItem) and hasattr(item, 'set_path_highlight_state'):
+                item.set_path_highlight_state('normal')
+            elif isinstance(item, ConnectionItem) and hasattr(item, 'set_path_highlight_state'):
+                item.set_path_highlight_state('normal')
+
+    def clear_validation_feedback(self):
+        for item in self.items():
+            if isinstance(item, NodeItem) and hasattr(item, 'set_validation_feedback'):
+                item.set_validation_feedback(None, [])
+            elif isinstance(item, ConnectionItem) and hasattr(item, 'set_validation_feedback'):
+                item.set_validation_feedback(None, [])
+
+    def apply_validation_issues(self, issues):
+        self.clear_validation_feedback()
+        ranked = {'error': 2, 'warning': 1, None: 0}
+        node_state = {}
+        node_messages = {}
+        conn_state = {}
+        conn_messages = {}
+        for issue in issues or []:
+            state = getattr(issue, 'state', None) or getattr(issue, 'severity', None) or 'warning'
+            state = 'error' if str(state).lower() == 'error' else 'warning'
+            message = str(getattr(issue, 'message', '') or '')
+            for node in getattr(issue, 'nodes', []) or []:
+                if node is None:
+                    continue
+                if ranked[state] > ranked.get(node_state.get(node), 0):
+                    node_state[node] = state
+                if message:
+                    node_messages.setdefault(node, []).append(message)
+            for conn in getattr(issue, 'connections', []) or []:
+                if conn is None:
+                    continue
+                if ranked[state] > ranked.get(conn_state.get(conn), 0):
+                    conn_state[conn] = state
+                if message:
+                    conn_messages.setdefault(conn, []).append(message)
+        for node, state in node_state.items():
+            if hasattr(node, 'set_validation_feedback'):
+                node.set_validation_feedback(state, node_messages.get(node, []))
+        for conn, state in conn_state.items():
+            if hasattr(conn, 'set_validation_feedback'):
+                conn.set_validation_feedback(state, conn_messages.get(conn, []))
 
     def clear_execution_feedback(self):
         for item in self.items():
@@ -801,7 +972,7 @@ class GraphScene(QtWidgets.QGraphicsScene):
                 continue
             if isinstance(item, NodeItem):
                 nodes.append(item.to_dict())
-            elif isinstance(item, ConnectionItem):
+            elif isinstance(item, ConnectionItem) and not getattr(item, 'is_projection', False):
                 conn_data = item.to_dict()
                 if conn_data:
                     connections.append(conn_data)
@@ -827,6 +998,7 @@ class GraphScene(QtWidgets.QGraphicsScene):
 
         for conn_entry in graph_data.get("connections", []):
             self.add_connection_from_dict(conn_entry)
+        self._notify_graph_changed()
 
     def handle_node_moved(self, node_item, old_pos, new_pos):
         if old_pos == new_pos or self.undo_stack is None:

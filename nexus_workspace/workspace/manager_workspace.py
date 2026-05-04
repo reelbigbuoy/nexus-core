@@ -22,6 +22,8 @@
 
 from dataclasses import dataclass
 
+from nexus_workspace.framework.qt import QtCore, QtWidgets
+
 from .controller import WorkspaceController
 from .layout_model import PaneNode, SplitNode, WorkspaceModel
 from .renderer import WorkspaceRenderer
@@ -96,6 +98,7 @@ class WorkspaceManager:
         for window in list(self._windows):
             window.refresh_window_title()
         self._cleanup_empty_detached_windows()
+        self.ensure_all_windows_visible()
 
     def begin_drag(self, source_pane, index):
         tool = source_pane.widget_at(index)
@@ -285,6 +288,126 @@ class WorkspaceManager:
 
         self.render_all()
 
+
+    def _screen_geometries(self):
+        """Return available geometries for every attached monitor."""
+        app = QtWidgets.QApplication.instance()
+        screens = app.screens() if app is not None else []
+        geometries = []
+        for screen in screens:
+            try:
+                available = screen.availableGeometry()
+                if available is not None and not available.isNull():
+                    geometries.append(QtCore.QRect(available))
+            except Exception:
+                pass
+        if not geometries:
+            geometries.append(QtCore.QRect(0, 0, 1280, 720))
+        return geometries
+
+    def _primary_screen_geometry(self):
+        app = QtWidgets.QApplication.instance()
+        try:
+            screen = app.primaryScreen() if app is not None else None
+            if screen is not None:
+                available = screen.availableGeometry()
+                if available is not None and not available.isNull():
+                    return QtCore.QRect(available)
+        except Exception:
+            pass
+        return self._screen_geometries()[0]
+
+    def _available_desktop_rect(self):
+        """Return the union of all currently visible monitor work areas."""
+        rect = QtCore.QRect()
+        for available in self._screen_geometries():
+            rect = rect.united(available) if not rect.isNull() else QtCore.QRect(available)
+        return rect
+
+    def _coerce_int(self, value, default):
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
+
+    def _intersection_area(self, a, b):
+        inter = a.intersected(b)
+        if inter.isNull():
+            return 0
+        return max(0, inter.width()) * max(0, inter.height())
+
+    def _screen_for_rect(self, rect, fallback_to_primary=True):
+        """Choose the monitor that should own a restored/live window rect.
+
+        If the rect intersects one or more monitors, keep it on the monitor
+        with the largest visible overlap.  If the rect is completely off every
+        monitor, use the primary screen as the safe recovery target.
+        """
+        screens = self._screen_geometries()
+        if rect is None or rect.isNull():
+            return self._primary_screen_geometry() if fallback_to_primary else screens[0]
+        best = None
+        best_area = 0
+        for screen_rect in screens:
+            area = self._intersection_area(rect, screen_rect)
+            if area > best_area:
+                best_area = area
+                best = screen_rect
+        if best is not None and best_area > 0:
+            return QtCore.QRect(best)
+        return self._primary_screen_geometry() if fallback_to_primary else QtCore.QRect(screens[0])
+
+    def _rect_is_fully_visible(self, rect, screen_rect):
+        """Return True only when the complete window rect is inside its target screen.
+
+        The manual View > Bring Windows On Screen command should be an
+        enforcement action, not only an emergency recovery action.  A window
+        that is even partially off-screen should be pulled fully back inside
+        the current monitor work area.
+        """
+        if rect is None or rect.isNull() or screen_rect.isNull():
+            return False
+        return screen_rect.contains(rect)
+
+    def _safe_fallback_geometry(self, width=1200, height=800, screen_rect=None):
+        screen_rect = QtCore.QRect(screen_rect or self._primary_screen_geometry())
+        min_w, min_h = 640, 420
+        width = max(min_w, min(int(width or 1200), max(min_w, screen_rect.width())))
+        height = max(min_h, min(int(height or 800), max(min_h, screen_rect.height())))
+        x = screen_rect.x() + max(0, (screen_rect.width() - width) // 2)
+        y = screen_rect.y() + max(0, (screen_rect.height() - height) // 2)
+        return QtCore.QRect(x, y, width, height)
+
+    def _clamped_window_geometry(self, geometry):
+        min_w, min_h = 640, 420
+        raw_width = self._coerce_int(geometry.get('width', 1200), 1200)
+        raw_height = self._coerce_int(geometry.get('height', 800), 800)
+        raw_x = self._coerce_int(geometry.get('x', 0), 0)
+        raw_y = self._coerce_int(geometry.get('y', 0), 0)
+        candidate = QtCore.QRect(raw_x, raw_y, max(1, raw_width), max(1, raw_height))
+        screen_rect = self._screen_for_rect(candidate, fallback_to_primary=True)
+
+        width = max(min_w, min(raw_width, max(min_w, screen_rect.width())))
+        height = max(min_h, min(raw_height, max(min_h, screen_rect.height())))
+        candidate = QtCore.QRect(raw_x, raw_y, width, height)
+
+        # Always enforce full visibility.  The previous recovery behavior only
+        # moved windows that were completely off-screen or barely reachable,
+        # which meant View > Bring Windows On Screen appeared to do nothing when
+        # a window was partially off-screen.  This clamps every live/restored
+        # window fully inside the best matching monitor while keeping it on the
+        # monitor with the largest overlap.
+        if not self._rect_is_fully_visible(candidate, screen_rect):
+            max_x = screen_rect.right() - width + 1
+            max_y = screen_rect.bottom() - height + 1
+            min_x = screen_rect.left()
+            min_y = screen_rect.top()
+            x = max(min_x, min(candidate.x(), max_x))
+            y = max(min_y, min(candidate.y(), max_y))
+            return QtCore.QRect(x, y, width, height)
+
+        return QtCore.QRect(candidate)
+
     def _restore_window(self, window, window_state, state_manager):
         root_node = state_manager.deserialize_layout_node(window_state.get('root_node'))
         self.model.windows[window.window_id].root_node = root_node
@@ -320,9 +443,107 @@ class WorkspaceManager:
             )
         geometry = window_state.get('geometry') or {}
         if geometry:
-            window.setGeometry(geometry.get('x', window.x()), geometry.get('y', window.y()), geometry.get('width', window.width()), geometry.get('height', window.height()))
+            window.setGeometry(self._clamped_window_geometry(geometry))
             if geometry.get('maximized'):
                 window.showMaximized()
+            else:
+                self.ensure_window_is_visible(window)
+
+    def ensure_window_is_visible(self, window):
+        """Clamp a live workspace/floating window after monitor changes."""
+        if window is None:
+            return
+        try:
+            if hasattr(window, 'isMaximized') and window.isMaximized():
+                return
+            geometry = window.geometry()
+            clamped = self._clamped_window_geometry({
+                'x': geometry.x(),
+                'y': geometry.y(),
+                'width': geometry.width(),
+                'height': geometry.height(),
+            })
+            if clamped != geometry:
+                window.setGeometry(clamped)
+            if hasattr(window, 'show'):
+                window.show()
+            if hasattr(window, 'raise_'):
+                window.raise_()
+        except Exception:
+            pass
+
+    def _recoverable_top_level_widgets(self):
+        """Return Nexus-owned top-level widgets that can be safely repositioned."""
+        widgets = []
+        seen = set()
+        for window in list(self._windows):
+            if window is not None:
+                widgets.append(window)
+                seen.add(id(window))
+
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return widgets
+
+        for widget in app.topLevelWidgets():
+            if widget is None or id(widget) in seen:
+                continue
+            if not widget.isVisible():
+                continue
+            is_floating_dock = isinstance(widget, QtWidgets.QDockWidget) and widget.isFloating()
+            is_nexus_workspace = hasattr(widget, 'workspace_manager') or hasattr(widget, 'window_id')
+            if is_floating_dock or is_nexus_workspace:
+                widgets.append(widget)
+                seen.add(id(widget))
+        return widgets
+
+    def ensure_all_windows_visible(self):
+        for window in self._recoverable_top_level_widgets():
+            self.ensure_window_is_visible(window)
+
+    def reset_layout_to_single_pane(self, primary_window=None):
+        """Move all open tools into one visible pane on the primary window.
+
+        This is a safety valve for corrupted layouts, off-screen detached
+        windows, or confusing split arrangements.  It intentionally preserves
+        open tool instances and their state.
+        """
+        primary = primary_window or self.primary_window()
+        if primary is None:
+            return
+
+        # Preserve tool order by walking the current layout before replacing it.
+        ordered_tool_ids = []
+        for window_node in list(self.model.windows.values()):
+            for pane in self.model.iter_panes(window_node.root_node):
+                for tool_id in pane.tool_ids:
+                    if tool_id in self.model.tools and tool_id not in ordered_tool_ids:
+                        ordered_tool_ids.append(tool_id)
+
+        if primary.window_id not in self.model.windows:
+            self.register_window(primary)
+        pane = PaneNode(tool_ids=ordered_tool_ids, active_tool_id=ordered_tool_ids[-1] if ordered_tool_ids else None)
+        self.model.windows[primary.window_id].root_node = pane
+        self.model.windows[primary.window_id].is_primary = True
+
+        # Empty the detached model windows before rendering so their live tool
+        # widgets are re-parented into the primary pane instead of being
+        # destroyed with the detached workspace.
+        for window_id, window_node in list(self.model.windows.items()):
+            if window_id != primary.window_id:
+                window_node.root_node = PaneNode()
+
+        self.model.normalize_window(self.model.windows[primary.window_id])
+        self.ensure_window_is_visible(primary)
+        self.render_all()
+
+        for window in list(self._windows):
+            if window is not primary:
+                try:
+                    window.close()
+                except Exception:
+                    pass
+        self.render_all()
 
     def make_next_tool_title(self, base_name="Tool"):
         title = "%s %s" % (base_name, self._next_tool_number)

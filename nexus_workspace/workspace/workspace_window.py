@@ -350,6 +350,17 @@ class WorkspaceWindow(NexusWindowBase):
         if menu is None:
             return
         menu.clear()
+
+        reset_layout_action = menu.addAction('Reset Layout')
+        reset_layout_action.setToolTip('Move all open tools back into one visible pane and close detached workspaces.')
+        reset_layout_action.triggered.connect(self.reset_workspace_layout)
+
+        clamp_windows_action = menu.addAction('Bring Windows On Screen')
+        clamp_windows_action.setToolTip('Clamp all Nexus workspace windows to the current monitor bounds.')
+        clamp_windows_action.triggered.connect(self.bring_workspace_windows_on_screen)
+
+        menu.addSeparator()
+
         if self.plugin_manager is None:
             action = menu.addAction('No views available')
             action.setEnabled(False)
@@ -364,6 +375,16 @@ class WorkspaceWindow(NexusWindowBase):
                 descriptor.display_name,
                 lambda checked=False, d=descriptor: self.open_tool_descriptor(d),
             )
+
+    def bring_workspace_windows_on_screen(self):
+        if self.workspace_manager is not None and hasattr(self.workspace_manager, 'ensure_all_windows_visible'):
+            self.workspace_manager.ensure_all_windows_visible()
+        self.statusbar.showMessage('Workspace windows clamped to visible monitor bounds.', 3000)
+
+    def reset_workspace_layout(self):
+        if self.workspace_manager is not None and hasattr(self.workspace_manager, 'reset_layout_to_single_pane'):
+            self.workspace_manager.reset_layout_to_single_pane(primary_window=self)
+        self.statusbar.showMessage('Workspace layout reset to a single visible pane.', 3000)
 
     def _rebuild_tools_menu(self):
         menu = getattr(self, 'toolsMenu', None)

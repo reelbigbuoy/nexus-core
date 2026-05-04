@@ -86,15 +86,24 @@ class WorkspaceTabBar(QtWidgets.QTabBar):
 
 
     def mouseDoubleClickEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton:
-            index = self.tabAt(event.pos())
-            if index >= 0:
-                button = self.tabButton(index, QtWidgets.QTabBar.RightSide)
-                if button is None or not button.geometry().contains(event.pos()):
-                    self._begin_rename(index)
-                    event.accept()
-                    return
+        # Tab rename is intentionally not double-click driven. Double-click is
+        # reserved for future tab activation/open behavior and avoids accidental
+        # rename sessions while switching tools quickly. Use right-click > Rename.
         super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        index = self.tabAt(event.pos())
+        if index < 0:
+            super().contextMenuEvent(event)
+            return
+        menu = QtWidgets.QMenu(self)
+        act_rename = menu.addAction("Rename Tab")
+        chosen = menu.exec_(event.globalPos())
+        if chosen is act_rename:
+            self._begin_rename(index)
+            event.accept()
+            return
+        super().contextMenuEvent(event)
 
     def _begin_rename(self, index):
         if index < 0 or index >= self.count():

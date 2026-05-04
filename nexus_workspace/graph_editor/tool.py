@@ -11,10 +11,12 @@
 
 import json
 import csv
+import hashlib
 import os
 import uuid
 from pathlib import Path
 from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
+from nexus_workspace.framework.controls import NexusTableEditor
 from .geometry import px, qpoint, qrect
 from nexus_workspace.core.serialization import NexusSerializable
 from nexus_workspace.core.themes import build_stylesheet, get_theme_colors
@@ -23,32 +25,18 @@ from nexus_workspace.core.inspectable_contract import build_field_descriptor, bu
 from nexus_workspace.core.action_contract import ACTION_STATUS_HANDLED, ACTION_STATUS_UNHANDLED, PROPERTY_EDIT_REQUEST, normalize_action_request
 from .view import GraphView
 from .scene import GraphScene
-from .commands import AddNodeCommand, DeleteItemsCommand, PasteItemsCommand, RenameNodeCommand, SetNodePropertyCommand
+from .commands import AddNodeCommand, DeleteItemsCommand, MoveNodeCommand, MoveInlineExpansionCommand, PasteItemsCommand, RenameNodeCommand, SetNodePropertyCommand
 from .definitions import NODE_REGISTRY, NODE_DEFINITIONS_DIR, load_external_node_definitions, node_definition_for_type, create_node_entry
 from .node_views import NODE_VIEW_MANIFESTS_DIR, NODE_VIEW_REGISTRY, NodeViewSession, NodeViewRules, load_node_views
 from .graphics_items import NodeItem, ConnectionItem, ConnectionPinItem, InlineSubgraphBoundaryItem
+from .graph_integrity import GraphIdRewriter, graph_json_safe
+from .authoring import GraphCommandDescriptor, GRAPH_COMMAND_REGISTRY, SelectionManager
+from .templates import GraphTemplateService
+from .validation import GraphValidationEngine
 
 
-STAT_MESSAGE_SCHEMAS = {
-    "RedundancyStatus": {
-        "active_channel": "string",
-        "redundancy_state": "string",
-        "channels": {
-            "primary": {"health": "float", "enabled": "bool", "fault_code": "int"},
-            "secondary": {"health": "float", "enabled": "bool", "fault_code": "int"}
-        }
-    },
-    "VehicleCommand": {
-        "command_id": "int",
-        "target_state": "string",
-        "parameters": {"timeout_ms": "int", "force": "bool"}
-    },
-    "HealthStatus": {
-        "component": "string",
-        "status": "string",
-        "metrics": {"temperature_c": "float", "voltage_v": "float", "current_a": "float"}
-    }
-}
+
+
 
 
 
@@ -123,19 +111,49 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._graph_context_stack = []
         self._root_graph_data = None
         self._inline_subgraph_expansions = {}
+        self.template_service = GraphTemplateService(tool_type_id=self.graph_tool_type_id, plugin_id=self.graph_plugin_id, parent=self)
+        self._graph_bookmarks = []
+        self.validation_engine = GraphValidationEngine()
+        self.validation_issues = []
+        self._validation_panel_updating = False
 
         self._connect_action_requests()
+        self._register_shared_authoring_commands()
         self._build_local_menus()
         self._build_local_panels()
         self._apply_view_header_styles()
         self._apply_active_node_view_registry()
         self._refresh_node_view_ui()
+        self._refresh_bookmarks_menu()
         self.scene.selectionChanged.connect(self.on_selection_changed)
         self.editNodeTitle.textEdited.connect(self.on_node_title_edited)
         self.editNodeTitle.editingFinished.connect(self.commit_node_title_edit)
         self.setWindowTitle(editor_title)
         self.clear_property_panel()
         self._ensure_current_graph_control_flow_nodes()
+
+
+    # ------------------------------------------------------------------
+    # Shared graph authoring commands
+    # ------------------------------------------------------------------
+    def _register_shared_authoring_commands(self):
+        """Register framework-owned authoring commands only.
+
+        Domain tools may add their own command maps, but nexus-core commands
+        must remain generic and must not reference STAT concepts.
+        """
+        descriptors = [
+            GraphCommandDescriptor('graph.align.left', 'Align Left', 'Layout', 'Ctrl+Alt+Left', 'Align selected nodes to the left edge.', lambda: self.align_selected_nodes('left')),
+            GraphCommandDescriptor('graph.align.right', 'Align Right', 'Layout', 'Ctrl+Alt+Right', 'Align selected nodes to the right edge.', lambda: self.align_selected_nodes('right')),
+            GraphCommandDescriptor('graph.align.center', 'Align Center X', 'Layout', '', 'Align selected items to the anchor center X.', lambda: self.align_selected_nodes('center')),
+            GraphCommandDescriptor('graph.align.top', 'Align Top', 'Layout', 'Ctrl+Alt+Up', 'Align selected nodes to the top edge.', lambda: self.align_selected_nodes('top')),
+            GraphCommandDescriptor('graph.align.bottom', 'Align Bottom', 'Layout', 'Ctrl+Alt+Down', 'Align selected nodes to the bottom edge.', lambda: self.align_selected_nodes('bottom')),
+            GraphCommandDescriptor('graph.align.middle', 'Align Middle Y', 'Layout', '', 'Align selected items to the anchor center Y.', lambda: self.align_selected_nodes('middle')),
+            GraphCommandDescriptor('graph.distribute.horizontal', 'Distribute Horizontally', 'Layout', 'Ctrl+Shift+Left/Right', 'Evenly distribute selected nodes horizontally.', lambda: self.distribute_selected_nodes('horizontal')),
+            GraphCommandDescriptor('graph.distribute.vertical', 'Distribute Vertically', 'Layout', 'Ctrl+Shift+Up/Down', 'Evenly distribute selected nodes vertically.', lambda: self.distribute_selected_nodes('vertical')),
+        ]
+        for descriptor in descriptors:
+            GRAPH_COMMAND_REGISTRY.register(descriptor)
 
     def _connect_action_requests(self):
         if self.plugin_context is None or self._action_handler_scope is not None:
@@ -186,7 +204,6 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             if new_title == old_title:
                 return {'handled': False, 'status': ACTION_STATUS_UNHANDLED}
             self.undo_stack.push(RenameNodeCommand(node_item, old_title, new_title))
-            self.set_editor_title(new_title)
             return {'handled': True, 'status': ACTION_STATUS_HANDLED, 'data': {'field_path': field_path, 'property_name': property_name}}
         old_value = node_item.node_data.properties.get(property_name)
         if old_value == value:
@@ -194,14 +211,39 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self.undo_stack.push(SetNodePropertyCommand(node_item, property_name, old_value, value))
         return {'handled': True, 'status': ACTION_STATUS_HANDLED, 'data': {'field_path': field_path, 'property_name': property_name}}
 
-    def on_node_mutated(self, node_item, update_editor_title=False):
+    def on_node_mutated(self, node_item, update_editor_title=False, refresh_properties=True):
         if node_item is None:
             return
         if self.selected_node_item is node_item:
-            self.populate_property_panel(node_item)
+            if refresh_properties:
+                self.populate_property_panel(node_item)
             self._publish_selection_to_data_store(node_item)
         if update_editor_title:
             self.set_editor_title(node_item.node_data.title)
+        self.schedule_validation_update()
+
+    def validation_policy(self):
+        return None
+
+    def schedule_validation_update(self):
+        if getattr(self, '_validation_update_pending', False):
+            return
+        self._validation_update_pending = True
+        QtCore.QTimer.singleShot(0, self.run_graph_validation)
+
+    def run_graph_validation(self):
+        self._validation_update_pending = False
+        policy = self.validation_policy()
+        try:
+            self.validation_issues = self.validation_engine.run(self, self.scene, policy)
+        except Exception as exc:
+            self.validation_issues = []
+            self._status_message(f'Graph validation failed: {exc}', 6000)
+        if hasattr(self.scene, 'apply_validation_issues'):
+            self.scene.apply_validation_issues(self.validation_issues)
+        self._refresh_validation_panel()
+        self._refresh_validation_button_state()
+        return self.validation_issues
 
     def _build_central_surfaces(self):
         self.graphView = GraphView(self, editor=self)
@@ -242,6 +284,27 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._viewHeaderDescriptionLabel.setWordWrap(True)
         self._viewHeaderDescriptionLabel.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
 
+        self._reframeButton = QtWidgets.QPushButton("Reframe", self._viewHeaderFrame)
+        self._reframeButton.setObjectName("nodeReframeButton")
+        self._reframeButton.setToolTip("Frame the visible graph. If multiple nodes are selected, frame the selection.")
+        self._reframeButton.clicked.connect(self.frame_selected_or_all)
+
+        self._addBookmarkButton = QtWidgets.QPushButton("Add Bookmark", self._viewHeaderFrame)
+        self._addBookmarkButton.setObjectName("nodeAddBookmarkButton")
+        self._addBookmarkButton.setToolTip("Bookmark the current graph view or selected region.")
+        self._addBookmarkButton.clicked.connect(self.add_graph_bookmark)
+
+        self._bookmarksButton = QtWidgets.QToolButton(self._viewHeaderFrame)
+        self._bookmarksButton.setObjectName("nodeBookmarksButton")
+        self._bookmarksButton.setText("Bookmarks")
+        self._bookmarksButton.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self._bookmarksButton.setToolTip("Jump to saved graph bookmarks.")
+
+        self._validationButton = QtWidgets.QPushButton("Validation", self._viewHeaderFrame)
+        self._validationButton.setObjectName("nodeValidationButton")
+        self._validationButton.setToolTip("Show graph validation errors and warnings.")
+        self._validationButton.clicked.connect(self.show_validation_panel)
+
         self._subgraphBackButton = QtWidgets.QPushButton("Back to Parent", self._viewHeaderFrame)
         self._subgraphBackButton.setObjectName("nodeSubgraphBackButton")
         self._subgraphBackButton.clicked.connect(self.close_current_subgraph)
@@ -258,6 +321,10 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         header_layout.addWidget(self._viewHeaderTypeLabel, 0)
         header_layout.addWidget(self._viewHeaderTypeCombo, 0)
         header_layout.addWidget(self._viewHeaderDescriptionLabel, 1)
+        header_layout.addWidget(self._reframeButton, 0)
+        header_layout.addWidget(self._addBookmarkButton, 0)
+        header_layout.addWidget(self._bookmarksButton, 0)
+        header_layout.addWidget(self._validationButton, 0)
         header_layout.addWidget(self._subgraphPathLabel, 0)
         header_layout.addWidget(self._subgraphBackButton, 0)
         editor_layout.addWidget(self._viewHeaderFrame, 0)
@@ -382,12 +449,12 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         return "Nexus Graph (*.nexnode);;Graph JSON (*.json);;All Files (*)"
 
     def _expected_node_view_id_for_container_type(self, container_type):
-        view_by_container = {
-            "stat.sequence": "stat.sequence_graph",
-            "stat.test_matrix": "stat.test_matrix_graph",
-            "stat.state_machine": "stat.state_machine_graph",
-        }
-        return view_by_container.get(container_type, self._active_node_view_id)
+        """Return the graph view expected for a generic container node.
+
+        Domain-specific tools override this method. The shared framework must
+        not know about plugin-specific graph types or file extensions.
+        """
+        return self._active_node_view_id
 
     def linked_graph_policy_for_node(self, node_item):
         """Return a policy dict for nodes that may reference external graphs.
@@ -427,12 +494,13 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             if show_feedback:
                 QtWidgets.QMessageBox.warning(self, "Invalid Linked Graph", reason)
             return False, reason
-        metadata = graph_data.get('metadata') if isinstance(graph_data, dict) else {}
-        actual_view_id = metadata.get('active_node_view_id') if isinstance(metadata, dict) else None
-        if expected_view_id and actual_view_id and actual_view_id != expected_view_id:
-            expected_name = getattr(NODE_VIEW_REGISTRY.get(expected_view_id), 'name', expected_view_id)
-            actual_name = getattr(NODE_VIEW_REGISTRY.get(actual_view_id), 'name', actual_view_id)
-            reason = f"This node expects a {expected_name}; the selected file is a {actual_name}."
+        ok, reason = self._validate_graph_payload_for_load(
+            graph_data,
+            file_path=file_path,
+            expected_view_id=expected_view_id,
+            show_feedback=False,
+        )
+        if not ok:
             if show_feedback:
                 QtWidgets.QMessageBox.warning(self, "Invalid Linked Graph", reason)
             return False, reason
@@ -607,6 +675,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         current_graph = self.scene.serialize_graph()
         metadata = current_graph.setdefault("metadata", {})
         metadata["active_node_view_id"] = self._active_node_view_id
+        self._write_bookmark_metadata_to_graph(current_graph)
         if self._graph_context_stack:
             context = self._graph_context_stack[-1]
             if not context.get("reference_only"):
@@ -624,7 +693,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self.set_active_node_view(target_view_id, announce=False, ignore_lock=True)
         self.scene._suspend_undo = True
         try:
-            self.scene.load_graph(self._ensure_graph_control_flow_nodes(graph_data or {"nodes": [], "connections": []}))
+            payload = self._ensure_graph_control_flow_nodes(graph_data or {"nodes": [], "connections": []})
+            self.scene.load_graph(payload)
+            self._set_graph_bookmarks_from_payload(payload)
         finally:
             self.scene._suspend_undo = False
         self.undo_stack.clear()
@@ -647,6 +718,11 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         graph_name = node_properties.get("graph_name") or node_item.node_data.title or "Sub-Graph"
         mode = str(node_properties.get('subgraph_source') or node_properties.get('subgraph_mode') or 'embedded').lower()
 
+        parent_view_id = self._active_node_view_id
+        parent_metadata = parent_graph.setdefault("metadata", {}) if isinstance(parent_graph, dict) else {}
+        if isinstance(parent_metadata, dict) and parent_view_id:
+            parent_metadata.setdefault("active_node_view_id", parent_view_id)
+
         if mode == 'linked':
             # Keep the live item in sync with the serialized parent properties,
             # then use the same active-subgraph resolver used by inline expand.
@@ -660,6 +736,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 "node_id": node_item.node_data.node_id,
                 "title": node_item.node_data.title,
                 "node_properties": node_properties,
+                "parent_view_id": parent_view_id,
                 "reference_only": True,
                 "linked_graph_path": node_properties.get('linked_graph_path') or '',
             }
@@ -672,6 +749,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 "node_id": node_item.node_data.node_id,
                 "title": node_item.node_data.title,
                 "node_properties": node_properties,
+                "parent_view_id": parent_view_id,
             }
 
         self._graph_context_stack.append(context)
@@ -864,6 +942,126 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             return False
         return self._translate_inline_expansion(container_id, dx, dy)
 
+
+    def _capture_inline_expansion_group_state(self, container_id):
+        """Capture absolute visual positions for a read-only inline expansion.
+
+        Boundary drags should be applied from this immutable start state rather
+        than by incremental deltas. That keeps the dashed boundary, child-node
+        projections, internal wires, and bridge wires locked together even when
+        Qt sends many move events or when route points are present.
+        """
+        expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id)
+        if not expansion:
+            return None
+        state = {
+            'container_pos': None,
+            'boundary_pos': None,
+            'node_positions': [],
+            'connection_routes': [],
+        }
+        container = expansion.get('container_node')
+        if container is not None:
+            try:
+                state['container_pos'] = QtCore.QPointF(container.pos())
+            except RuntimeError:
+                pass
+        boundary = expansion.get('boundary')
+        if boundary is not None:
+            try:
+                state['boundary_pos'] = QtCore.QPointF(boundary.pos())
+            except RuntimeError:
+                pass
+        for node in list(expansion.get('nodes', []) or []):
+            try:
+                state['node_positions'].append((node, QtCore.QPointF(node.pos())))
+            except RuntimeError:
+                continue
+        for conn in list(expansion.get('connections', []) or []):
+            try:
+                routes = [QtCore.QPointF(point) for point in list(getattr(conn, 'route_points', []) or [])]
+                state['connection_routes'].append((conn, routes))
+            except RuntimeError:
+                continue
+        return state
+
+    def _apply_inline_expansion_group_drag_state(self, container_id, start_state, delta):
+        """Apply a boundary drag from a captured start state.
+
+        This is intentionally visual-only for projected child content, while the
+        hidden parent container also moves so collapse/save behavior remains
+        coherent. Existing wire styling and routing classes are not changed.
+        """
+        if not start_state:
+            return False
+        expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id)
+        if not expansion:
+            return False
+        delta = QtCore.QPointF(delta)
+        previous_suspend = bool(getattr(self.scene, '_suspend_undo', False))
+        self.scene._suspend_undo = True
+        try:
+            container = expansion.get('container_node')
+            base_container_pos = start_state.get('container_pos')
+            if container is not None and base_container_pos is not None:
+                try:
+                    container.setPos(QtCore.QPointF(base_container_pos) + delta)
+                except RuntimeError:
+                    pass
+            boundary = expansion.get('boundary')
+            base_boundary_pos = start_state.get('boundary_pos')
+            if boundary is not None and base_boundary_pos is not None:
+                try:
+                    boundary.setPos(QtCore.QPointF(base_boundary_pos) + delta)
+                except RuntimeError:
+                    pass
+            for node, base_pos in list(start_state.get('node_positions', []) or []):
+                try:
+                    node.setPos(QtCore.QPointF(base_pos) + delta)
+                except RuntimeError:
+                    continue
+            for conn, base_routes in list(start_state.get('connection_routes', []) or []):
+                try:
+                    if base_routes:
+                        conn.set_route_points([QtCore.QPointF(point) + delta for point in base_routes])
+                    conn.update_path()
+                    conn.sync_pin_items()
+                except RuntimeError:
+                    continue
+        finally:
+            self.scene._suspend_undo = previous_suspend
+        if hasattr(self.scene, 'ensure_logical_scene_rect'):
+            boundary = expansion.get('boundary')
+            if boundary is not None:
+                self.scene.ensure_logical_scene_rect(boundary.sceneBoundingRect())
+        return True
+
+    def _apply_inline_expansion_group_move(self, container_id, new_container_pos):
+        """Move an expanded inline subgraph as one visual/read-only group."""
+        expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id)
+        if not expansion:
+            return False
+        container = expansion.get('container_node')
+        if container is None:
+            return False
+        try:
+            old_pos = QtCore.QPointF(container.pos())
+            new_pos = QtCore.QPointF(new_container_pos)
+        except RuntimeError:
+            return False
+        if old_pos == new_pos:
+            return True
+        state = self._capture_inline_expansion_group_state(container_id)
+        if not state:
+            return False
+        return self._apply_inline_expansion_group_drag_state(container_id, state, new_pos - old_pos)
+
+    def handle_inline_boundary_moved(self, container_id, old_pos, new_pos):
+        if old_pos == new_pos or self.undo_stack is None:
+            return False
+        self.undo_stack.push(MoveInlineExpansionCommand(self, container_id, old_pos, new_pos))
+        return True
+
     def _inline_translated_route_points(self, conn_data, anchor, min_x, min_y):
         """Translate sub-graph wire bend points into parent-scene inline coordinates.
 
@@ -883,11 +1081,18 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 continue
         return translated
 
-    def _translate_inline_expansion(self, container_id, dx, dy=0.0):
+    def _translate_inline_expansion(self, container_id, dx, dy=0.0, move_container=False):
         expansion = self._inline_subgraph_expansions.get(container_id)
         if not expansion:
             return False
         delta = QtCore.QPointF(float(dx), float(dy))
+        if move_container:
+            container = expansion.get("container_node")
+            if container is not None:
+                try:
+                    container.setPos(container.pos() + delta)
+                except RuntimeError:
+                    pass
         for node in list(expansion.get("nodes", []) or []):
             try:
                 node.setPos(node.pos() + delta)
@@ -925,6 +1130,170 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             except RuntimeError:
                 continue
         return shifted
+
+
+    def _add_inline_projection_connection_from_dict(self, conn_entry):
+        """Add a visual-only inline bridge connection.
+
+        These wires show continuity across an expanded container, but they are
+        not persisted, selectable, editable, or counted against input-port
+        cardinality. This keeps the hidden parent/container model wire intact
+        while letting users see the full path through the expanded subgraph.
+        """
+        if not isinstance(conn_entry, dict):
+            return None
+        source_node = self.scene.find_node_by_id(conn_entry.get("source_node_id"))
+        target_node = self.scene.find_node_by_id(conn_entry.get("target_node_id"))
+        if source_node is None or target_node is None:
+            return None
+        source_port = self.scene.find_output_port(source_node, conn_entry.get("source_port_name"))
+        target_port = self.scene.find_input_port(target_node, conn_entry.get("target_port_name"))
+        if source_port is None or target_port is None:
+            return None
+        route_points = []
+        for point in conn_entry.get("route_points", []) or []:
+            try:
+                x, y = point
+                route_points.append(QtCore.QPointF(float(x), float(y)))
+            except Exception:
+                continue
+        citem = self.scene.create_projection_connection(
+            source_port,
+            target_port,
+            route_points=route_points,
+            connection_kind=conn_entry.get("connection_kind"),
+        )
+        if citem is not None:
+            self._make_inline_connection_read_only(citem)
+        return citem
+
+    def _remove_inline_projection_connections(self, expansion):
+        """Remove only visual bridge wires for an inline expansion."""
+        if not expansion:
+            return
+        for conn in list(expansion.get("projection_connections", []) or []):
+            try:
+                conn.remove_from_ports()
+                for pin in list(getattr(conn, 'pin_items', [])):
+                    self.scene.removeItem(pin)
+                self.scene.removeItem(conn)
+            except RuntimeError:
+                pass
+        expansion["projection_connections"] = []
+
+    def _inline_endpoint_sources_for_external_connection(self, conn_entry):
+        """Return source endpoint dictionaries for a real parent-model connection.
+
+        If the real source is itself an expanded container, use that expanded
+        container's internal exit node projection endpoint rather than the
+        hidden container port. This prevents bridge wires from being drawn back
+        to a container's old/collapsed position when multiple containers are
+        expanded at once.
+        """
+        source_node_id = conn_entry.get("source_node_id")
+        source_port_name = conn_entry.get("source_port_name")
+        source_expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(source_node_id)
+        if source_expansion:
+            candidates = list(source_expansion.get("exit_sources", []) or [])
+            matched = [item for item in candidates if not item.get("container_port_name") or item.get("container_port_name") == source_port_name]
+            return matched or candidates
+        return [{
+            "node_id": source_node_id,
+            "port_name": source_port_name,
+        }]
+
+    def _inline_endpoint_targets_for_external_connection(self, conn_entry):
+        """Return target endpoint dictionaries for a real parent-model connection.
+
+        If the real target is an expanded container, use that expanded
+        container's internal entry node projection endpoint rather than the
+        hidden container port.
+        """
+        target_node_id = conn_entry.get("target_node_id")
+        target_port_name = conn_entry.get("target_port_name")
+        target_expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(target_node_id)
+        if target_expansion:
+            candidates = list(target_expansion.get("entry_targets", []) or [])
+            matched = [item for item in candidates if not item.get("container_port_name") or item.get("container_port_name") == target_port_name]
+            return matched or candidates
+        return [{
+            "node_id": target_node_id,
+            "port_name": target_port_name,
+        }]
+
+    def _add_inline_projection_connection_between_endpoints(self, source_ep, target_ep, connection_kind=None):
+        if not source_ep or not target_ep:
+            return None
+        conn_entry = {
+            "source_node_id": source_ep.get("node_id"),
+            "source_port_name": source_ep.get("port_name"),
+            "target_node_id": target_ep.get("node_id"),
+            "target_port_name": target_ep.get("port_name"),
+            "route_points": [],
+            "connection_kind": connection_kind,
+        }
+        return self._add_inline_projection_connection_from_dict(conn_entry)
+
+    def _refresh_inline_projection_connections(self):
+        """Rebuild all inter-layer bridge wires for expanded containers.
+
+        This is intentionally a separate pass from creating inline node clones.
+        With multiple expanded containers, a real parent connection may run from
+        container A to container B. Both containers are hidden while expanded, so
+        bridge endpoints must resolve to A's internal exit projection and B's
+        internal entry projection. Rebuilding all bridges after the expansion set
+        changes prevents stale wires from pointing at a container's old position.
+        """
+        expansions = getattr(self, '_inline_subgraph_expansions', {}) or {}
+        if not expansions:
+            return
+        for expansion in list(expansions.values()):
+            self._remove_inline_projection_connections(expansion)
+
+        try:
+            graph_connections = list(self.scene.serialize_graph().get("connections", []) or [])
+        except Exception:
+            graph_connections = []
+
+        seen = set()
+        created_by_container = {cid: [] for cid in expansions.keys()}
+
+        for conn in graph_connections:
+            src_id = conn.get("source_node_id")
+            tgt_id = conn.get("target_node_id")
+            if src_id not in expansions and tgt_id not in expansions:
+                continue
+            source_eps = self._inline_endpoint_sources_for_external_connection(conn)
+            target_eps = self._inline_endpoint_targets_for_external_connection(conn)
+            for source_ep in source_eps:
+                for target_ep in target_eps:
+                    key = (
+                        source_ep.get("node_id"), source_ep.get("port_name"),
+                        target_ep.get("node_id"), target_ep.get("port_name"),
+                        conn.get("connection_kind"),
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    citem = self._add_inline_projection_connection_between_endpoints(source_ep, target_ep, connection_kind=conn.get("connection_kind"))
+                    if citem is None:
+                        continue
+                    # Track the projection under every expanded container it is
+                    # visually bridging so cleanup remains deterministic.
+                    owners = {cid for cid in (src_id, tgt_id) if cid in expansions}
+                    if not owners:
+                        owners = set(expansions.keys())
+                    for cid in owners:
+                        created_by_container.setdefault(cid, []).append(citem)
+
+        for cid, items in created_by_container.items():
+            if cid in expansions:
+                expansions[cid]["projection_connections"] = items
+                connections = list(expansions[cid].get("internal_connections", []) or [])
+                for item in items:
+                    if item not in connections:
+                        connections.append(item)
+                expansions[cid]["connections"] = connections
 
     def expand_subgraph_node(self, node_item):
         """Visually expand a sub-graph inline without permanently flattening the model."""
@@ -992,44 +1361,46 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     self._make_inline_node_read_only(item)
                     item.setOpacity(0.96)
                     created_nodes.append(item)
-            external_in = [c for c in self.scene.serialize_graph().get("connections", []) if c.get("target_node_id") == container_id]
-            external_out = [c for c in self.scene.serialize_graph().get("connections", []) if c.get("source_node_id") == container_id]
             start_edges = [c for c in subgraph.get("connections", []) if c.get("source_node_id") in start_ids and c.get("target_node_id") not in end_ids]
             end_edges = [c for c in subgraph.get("connections", []) if c.get("target_node_id") in end_ids and c.get("source_node_id") not in start_ids]
-            for conn in subgraph.get("connections", []):
-                src, tgt = conn.get("source_node_id"), conn.get("target_node_id")
-                if src in start_ids or tgt in end_ids or src in end_ids or tgt in start_ids:
-                    continue
-                cloned = dict(conn)
-                cloned["source_node_id"] = self._new_node_id(src, remap)
-                cloned["target_node_id"] = self._new_node_id(tgt, remap)
-                cloned["route_points"] = self._inline_translated_route_points(conn, anchor, min_x, min_y)
-                citem = self.scene.add_connection_from_dict(cloned)
-                if citem is not None:
-                    self._make_inline_connection_read_only(citem)
-                    created_connections.append(citem)
-            for ext in external_in:
-                for edge in start_edges:
-                    bridged = dict(edge)
-                    bridged["source_node_id"] = ext.get("source_node_id")
-                    bridged["source_port_name"] = ext.get("source_port_name")
-                    bridged["target_node_id"] = self._new_node_id(edge.get("target_node_id"), remap)
-                    bridged["route_points"] = self._inline_translated_route_points(edge, anchor, min_x, min_y)
-                    citem = self.scene.add_connection_from_dict(bridged)
-                    if citem is not None:
-                        self._make_inline_connection_read_only(citem)
-                        created_connections.append(citem)
+            entry_targets = []
+            for edge in start_edges:
+                target_node_id = self._new_node_id(edge.get("target_node_id"), remap)
+                target_port_name = edge.get("target_port_name")
+                if target_node_id and target_port_name:
+                    entry_targets.append({
+                        "node_id": target_node_id,
+                        "port_name": target_port_name,
+                        "container_port_name": edge.get("source_port_name"),
+                    })
+            exit_sources = []
             for edge in end_edges:
-                for ext in external_out:
-                    bridged = dict(edge)
-                    bridged["source_node_id"] = self._new_node_id(edge.get("source_node_id"), remap)
-                    bridged["target_node_id"] = ext.get("target_node_id")
-                    bridged["target_port_name"] = ext.get("target_port_name")
-                    bridged["route_points"] = self._inline_translated_route_points(edge, anchor, min_x, min_y)
-                    citem = self.scene.add_connection_from_dict(bridged)
+                source_node_id = self._new_node_id(edge.get("source_node_id"), remap)
+                source_port_name = edge.get("source_port_name")
+                if source_node_id and source_port_name:
+                    exit_sources.append({
+                        "node_id": source_node_id,
+                        "port_name": source_port_name,
+                        "container_port_name": edge.get("target_port_name"),
+                    })
+
+            previous_inline_preview_flag = bool(getattr(self.scene, '_allow_inline_preview_connections', False))
+            self.scene._allow_inline_preview_connections = True
+            try:
+                for conn in subgraph.get("connections", []):
+                    src, tgt = conn.get("source_node_id"), conn.get("target_node_id")
+                    if src in start_ids or tgt in end_ids or src in end_ids or tgt in start_ids:
+                        continue
+                    cloned = dict(conn)
+                    cloned["source_node_id"] = self._new_node_id(src, remap)
+                    cloned["target_node_id"] = self._new_node_id(tgt, remap)
+                    cloned["route_points"] = self._inline_translated_route_points(conn, anchor, min_x, min_y)
+                    citem = self.scene.add_connection_from_dict(cloned)
                     if citem is not None:
                         self._make_inline_connection_read_only(citem)
                         created_connections.append(citem)
+            finally:
+                self.scene._allow_inline_preview_connections = previous_inline_preview_flag
             for conn in list(self.scene.items()):
                 if isinstance(conn, ConnectionItem) and not getattr(conn, '_inline_subgraph_display', False):
                     data = conn.to_dict()
@@ -1049,13 +1420,18 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self.scene.addItem(boundary)
             self._inline_subgraph_expansions[container_id] = {
                 "nodes": created_nodes,
-                "connections": created_connections,
+                "internal_connections": list(created_connections),
+                "projection_connections": [],
+                "connections": list(created_connections),
+                "entry_targets": entry_targets,
+                "exit_sources": exit_sources,
                 "boundary": boundary,
                 "shifted_positions": shifted_positions,
                 "hidden_connections": hidden_connections,
                 "container_node": node_item,
                 "shifted_inline_expansions": shifted_inline_expansions,
             }
+            self._refresh_inline_projection_connections()
         finally:
             self.scene._suspend_undo = False
         self.scene.clearSelection()
@@ -1262,14 +1638,22 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
 
     def _find_compatible_view_id_for_graph_data(self, graph_data, preferred_view_id=None):
         candidate_ids = []
-        if preferred_view_id:
-            candidate_ids.append(preferred_view_id)
+
+        def add_candidate(view_id):
+            if view_id and view_id not in candidate_ids and self._view_id_allowed_for_tool(view_id):
+                candidate_ids.append(view_id)
+
+        # Caller preference wins first, then the tool-specific default. This is
+        # Tool-specific defaults win before alphabetic view order so domain
+        # plugins can choose their preferred compatible view without core
+        # knowing those domain concepts.
+        add_candidate(preferred_view_id)
+        add_candidate(getattr(self, "graph_default_node_view_id", None))
         default_view = NODE_VIEW_REGISTRY.default_view()
-        if default_view is not None and default_view.view_id not in candidate_ids:
-            candidate_ids.append(default_view.view_id)
+        if default_view is not None:
+            add_candidate(default_view.view_id)
         for view in self.available_node_views():
-            if view.view_id not in candidate_ids:
-                candidate_ids.append(view.view_id)
+            add_candidate(view.view_id)
         if not candidate_ids:
             return None
         for view_id in candidate_ids:
@@ -1743,20 +2127,35 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self.tableEditorGroup = QtWidgets.QGroupBox("Table Data", properties_host)
         table_layout = QtWidgets.QVBoxLayout(self.tableEditorGroup)
         table_toolbar = QtWidgets.QHBoxLayout()
+        table_policy = self.table_editor_policy()
         self.btnImportTableCsv = QtWidgets.QPushButton("Import CSV", self.tableEditorGroup)
         self.btnAddTableColumn = QtWidgets.QPushButton("Add Column", self.tableEditorGroup)
         self.btnRenameTableColumn = QtWidgets.QPushButton("Rename Column", self.tableEditorGroup)
         self.btnRemoveTableColumn = QtWidgets.QPushButton("Remove Column", self.tableEditorGroup)
         self.btnAddTableRow = QtWidgets.QPushButton("Add Row", self.tableEditorGroup)
         self.btnRemoveTableRow = QtWidgets.QPushButton("Remove Row", self.tableEditorGroup)
-        for btn in (self.btnImportTableCsv, self.btnAddTableColumn, self.btnRenameTableColumn, self.btnRemoveTableColumn, self.btnAddTableRow, self.btnRemoveTableRow):
+        table_buttons = [self.btnImportTableCsv, self.btnAddTableColumn]
+        if table_policy.get("show_rename_button", True):
+            table_buttons.append(self.btnRenameTableColumn)
+        table_buttons.extend([self.btnRemoveTableColumn, self.btnAddTableRow, self.btnRemoveTableRow])
+        for btn in table_buttons:
             table_toolbar.addWidget(btn)
+        self.btnRenameTableColumn.setVisible(table_policy.get("show_rename_button", True))
         table_toolbar.addStretch(1)
         table_layout.addLayout(table_toolbar)
         self.tableColumnsSummary = QtWidgets.QLabel("", self.tableEditorGroup)
         self.tableColumnsSummary.setWordWrap(True)
         table_layout.addWidget(self.tableColumnsSummary)
-        self.tableWidget = QtWidgets.QTableWidget(self.tableEditorGroup)
+        self.tableWidget = NexusTableEditor(
+            self.tableEditorGroup,
+            object_name="GraphTableDataEditor",
+            enable_sorting=table_policy.get("enable_sorting", True),
+            enable_filtering=table_policy.get("enable_filtering", True),
+            allow_structure_edit=True,
+            editable_cells=True,
+            spreadsheet_mode=True,
+            selection_behavior=QtWidgets.QAbstractItemView.SelectItems,
+        )
         self.tableWidget.setAlternatingRowColors(False)
         self.tableWidget.setShowGrid(True)
         self.tableWidget.setCornerButtonEnabled(True)
@@ -1777,21 +2176,24 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self.btnAddTableRow.clicked.connect(self.add_table_row)
         self.btnRemoveTableRow.clicked.connect(self.remove_selected_table_row)
         self.tableWidget.itemChanged.connect(self.on_table_item_changed)
+        self.tableWidget.tableDataChanged.connect(self.on_table_widget_data_changed)
+        self.tableWidget.structureChanged.connect(self.on_table_widget_structure_changed)
+        self.tableWidget.columnRenamed.connect(self.on_table_widget_column_renamed)
 
 
-        self.statMessageGroup = QtWidgets.QGroupBox("Message Field Selection", properties_host)
-        stat_layout = QtWidgets.QVBoxLayout(self.statMessageGroup)
-        self.statTreeHint = QtWidgets.QLabel("Choose ICD, Message Type, and Topic above. Check primitive fields to include them.", self.statMessageGroup)
-        self.statTreeHint.setWordWrap(True)
-        stat_layout.addWidget(self.statTreeHint)
-        self.statMessageTree = QtWidgets.QTreeWidget(self.statMessageGroup)
-        self.statMessageTree.setColumnCount(3)
-        self.statMessageTree.setHeaderLabels(["Field", "Type", "Value"])
-        self.statMessageTree.setRootIsDecorated(True)
-        self.statMessageTree.setAlternatingRowColors(False)
-        self.statMessageTree.itemChanged.connect(self.on_stat_tree_item_changed)
-        stat_layout.addWidget(self.statMessageTree)
-        self.statMessageGroup.hide()
+        self.messageSchemaGroup = QtWidgets.QGroupBox("Message Field Selection", properties_host)
+        message_schema_layout = QtWidgets.QVBoxLayout(self.messageSchemaGroup)
+        self.messageSchemaHint = QtWidgets.QLabel("Choose message type/topic above. Check primitive fields to include them.", self.messageSchemaGroup)
+        self.messageSchemaHint.setWordWrap(True)
+        message_schema_layout.addWidget(self.messageSchemaHint)
+        self.messageSchemaTree = QtWidgets.QTreeWidget(self.messageSchemaGroup)
+        self.messageSchemaTree.setColumnCount(3)
+        self.messageSchemaTree.setHeaderLabels(["Field", "Type", "Value"])
+        self.messageSchemaTree.setRootIsDecorated(True)
+        self.messageSchemaTree.setAlternatingRowColors(False)
+        self.messageSchemaTree.itemChanged.connect(self.on_message_schema_tree_item_changed)
+        message_schema_layout.addWidget(self.messageSchemaTree)
+        self.messageSchemaGroup.hide()
 
         self.dynamicPortsGroup = QtWidgets.QGroupBox("Data Ports", properties_host)
         ports_layout = QtWidgets.QVBoxLayout(self.dynamicPortsGroup)
@@ -1846,7 +2248,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         root_layout.addLayout(self.propertiesForm)
         root_layout.addWidget(self.dynamicPropertiesContainer)
         root_layout.addWidget(self.tableEditorGroup)
-        root_layout.addWidget(self.statMessageGroup)
+        root_layout.addWidget(self.messageSchemaGroup)
         root_layout.addWidget(self.dynamicPortsGroup)
         root_layout.addWidget(self.subgraphSourceGroup)
         root_layout.addStretch(1)
@@ -1855,6 +2257,225 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dockProperties)
         self.dockProperties.resize(px(self._properties_default_width), px(self.dockProperties.height()))
         self.dockProperties.hide()
+
+        self._build_validation_panel()
+
+    def _build_validation_panel(self):
+        """Create the shared, read-only validation issue panel.
+
+        The panel is framework-owned. Domain plugins, such as STAT, only provide
+        validation issues through their validation policy. The panel renders
+        whatever issues the active policy returns and provides navigation back
+        to the affected graph items.
+        """
+        self.dockValidation = QtWidgets.QDockWidget("Validation", self)
+        self.dockValidation.setObjectName(f"dockValidation_{id(self)}")
+        self.dockValidation.setAllowedAreas(
+            QtCore.Qt.LeftDockWidgetArea |
+            QtCore.Qt.RightDockWidgetArea |
+            QtCore.Qt.BottomDockWidgetArea
+        )
+        self.dockValidation.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetMovable |
+            QtWidgets.QDockWidget.DockWidgetClosable
+        )
+
+        host = QtWidgets.QWidget(self.dockValidation)
+        layout = QtWidgets.QVBoxLayout(host)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        self.validationSummaryLabel = QtWidgets.QLabel("No validation issues", host)
+        self.validationSummaryLabel.setObjectName("graphValidationSummaryLabel")
+        self.validationSummaryLabel.setWordWrap(True)
+        layout.addWidget(self.validationSummaryLabel)
+
+        self.validationTree = QtWidgets.QTreeWidget(host)
+        self.validationTree.setObjectName("graphValidationTree")
+        self.validationTree.setColumnCount(3)
+        self.validationTree.setHeaderLabels(["Severity", "Issue", "Code"])
+        self.validationTree.setRootIsDecorated(True)
+        self.validationTree.setUniformRowHeights(False)
+        self.validationTree.setAlternatingRowColors(False)
+        self.validationTree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.validationTree.itemActivated.connect(self._on_validation_tree_item_activated)
+        self.validationTree.itemClicked.connect(self._on_validation_tree_item_clicked)
+        self.validationTree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.validationTree.customContextMenuRequested.connect(self._show_validation_tree_context_menu)
+        layout.addWidget(self.validationTree, 1)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.btnRefreshValidation = QtWidgets.QPushButton("Refresh", host)
+        self.btnRefreshValidation.clicked.connect(self.run_graph_validation)
+        self.btnFrameValidationIssue = QtWidgets.QPushButton("Focus Selected", host)
+        self.btnFrameValidationIssue.clicked.connect(self.focus_selected_validation_issue)
+        button_row.addWidget(self.btnRefreshValidation)
+        button_row.addWidget(self.btnFrameValidationIssue)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self.dockValidation.setWidget(host)
+        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.dockValidation)
+        self.dockValidation.hide()
+        self._refresh_validation_panel()
+
+    def _validation_issue_title(self, issue):
+        return str(getattr(issue, 'message', '') or 'Validation issue')
+
+    def _validation_issue_severity(self, issue):
+        severity = str(getattr(issue, 'state', None) or getattr(issue, 'severity', '') or 'warning').strip().lower()
+        return 'error' if severity == 'error' else 'warning'
+
+    def _refresh_validation_panel(self):
+        if not hasattr(self, 'validationTree'):
+            return
+        self._validation_panel_updating = True
+        try:
+            self.validationTree.clear()
+            issues = list(getattr(self, 'validation_issues', []) or [])
+            errors = [issue for issue in issues if self._validation_issue_severity(issue) == 'error']
+            warnings = [issue for issue in issues if self._validation_issue_severity(issue) != 'error']
+            if not issues:
+                self.validationSummaryLabel.setText('✔ No validation issues')
+                empty = QtWidgets.QTreeWidgetItem(['', 'No validation issues', ''])
+                empty.setFlags(QtCore.Qt.ItemIsEnabled)
+                self.validationTree.addTopLevelItem(empty)
+                self.validationTree.resizeColumnToContents(0)
+                self.validationTree.resizeColumnToContents(2)
+                return
+
+            self.validationSummaryLabel.setText(f'{len(errors)} error(s), {len(warnings)} warning(s)')
+            groups = [('Errors', errors, '❌'), ('Warnings', warnings, '⚠')]
+            for group_name, group_issues, icon in groups:
+                if not group_issues:
+                    continue
+                group = QtWidgets.QTreeWidgetItem([icon, f'{group_name} ({len(group_issues)})', ''])
+                group.setFlags(QtCore.Qt.ItemIsEnabled)
+                self.validationTree.addTopLevelItem(group)
+                for issue in group_issues:
+                    try:
+                        issue_index = next(index for index, candidate in enumerate(issues) if candidate is issue)
+                    except StopIteration:
+                        issue_index = issues.index(issue)
+                    severity = self._validation_issue_severity(issue)
+                    code = str(getattr(issue, 'code', '') or '')
+                    label = self._validation_issue_title(issue)
+                    item = QtWidgets.QTreeWidgetItem([icon if severity == 'error' else '⚠', label, code])
+                    item.setData(0, QtCore.Qt.UserRole, issue_index)
+                    item.setToolTip(1, label)
+                    if code:
+                        item.setToolTip(2, code)
+                    group.addChild(item)
+                group.setExpanded(True)
+            self.validationTree.resizeColumnToContents(0)
+            self.validationTree.resizeColumnToContents(2)
+        finally:
+            self._validation_panel_updating = False
+
+    def _refresh_validation_button_state(self):
+        button = getattr(self, '_validationButton', None)
+        if button is None:
+            return
+        issues = list(getattr(self, 'validation_issues', []) or [])
+        error_count = sum(1 for issue in issues if self._validation_issue_severity(issue) == 'error')
+        warning_count = len(issues) - error_count
+        if error_count:
+            button.setText(f'Validation ({error_count}E)')
+            button.setToolTip(f'{error_count} validation error(s), {warning_count} warning(s). Click to review.')
+        elif warning_count:
+            button.setText(f'Validation ({warning_count}W)')
+            button.setToolTip(f'{warning_count} validation warning(s). Click to review.')
+        else:
+            button.setText('Validation')
+            button.setToolTip('No validation issues. Click to open the validation panel.')
+
+    def _issue_for_tree_item(self, item):
+        if item is None:
+            return None
+        issue_index = item.data(0, QtCore.Qt.UserRole)
+        if issue_index is None:
+            return None
+        issues = list(getattr(self, 'validation_issues', []) or [])
+        try:
+            index = int(issue_index)
+        except Exception:
+            return None
+        if 0 <= index < len(issues):
+            return issues[index]
+        return None
+
+    def _validation_issue_graph_items(self, issue):
+        items = []
+        for node in getattr(issue, 'nodes', []) or []:
+            if node is not None and hasattr(node, 'sceneBoundingRect') and node.isVisible():
+                items.append(node)
+        for connection in getattr(issue, 'connections', []) or []:
+            if connection is not None and hasattr(connection, 'sceneBoundingRect') and connection.isVisible():
+                items.append(connection)
+        return items
+
+    def focus_validation_issue(self, issue):
+        items = self._validation_issue_graph_items(issue)
+        if not items:
+            self._status_message('Validation issue has no visible graph item to focus.', 3000)
+            return False
+        self.scene.clearSelection()
+        for item in items:
+            try:
+                item.setSelected(True)
+            except Exception:
+                pass
+        if hasattr(self.graphView, 'frame_items'):
+            self.graphView.frame_items(items)
+        else:
+            rect = QtCore.QRectF()
+            for item in items:
+                rect = rect.united(item.sceneBoundingRect())
+            if rect.isValid() and not rect.isNull():
+                self.graphView.centerOn(rect.center())
+        self._status_message(self._validation_issue_title(issue), 4500)
+        return True
+
+    def focus_selected_validation_issue(self):
+        if not hasattr(self, 'validationTree'):
+            return False
+        issue = self._issue_for_tree_item(self.validationTree.currentItem())
+        if issue is None:
+            return False
+        return self.focus_validation_issue(issue)
+
+    def _on_validation_tree_item_clicked(self, item, column):
+        issue = self._issue_for_tree_item(item)
+        if issue is not None:
+            self.focus_validation_issue(issue)
+
+    def _on_validation_tree_item_activated(self, item, column):
+        issue = self._issue_for_tree_item(item)
+        if issue is not None:
+            self.focus_validation_issue(issue)
+
+    def _show_validation_tree_context_menu(self, pos):
+        if not hasattr(self, 'validationTree'):
+            return
+        item = self.validationTree.itemAt(pos)
+        issue = self._issue_for_tree_item(item)
+        menu = QtWidgets.QMenu(self.validationTree)
+        focus_action = menu.addAction('Focus Issue')
+        focus_action.setEnabled(issue is not None)
+        refresh_action = menu.addAction('Refresh Validation')
+        chosen = menu.exec_(self.validationTree.viewport().mapToGlobal(pos))
+        if chosen is focus_action and issue is not None:
+            self.focus_validation_issue(issue)
+        elif chosen is refresh_action:
+            self.run_graph_validation()
+
+    def show_validation_panel(self):
+        self.run_graph_validation()
+        if hasattr(self, 'dockValidation') and self.dockValidation is not None:
+            self.dockValidation.show()
+            self.dockValidation.raise_()
+            self.dockValidation.activateWindow()
+        return True
 
     def _property_dock_current_width(self):
         if not hasattr(self, 'dockProperties') or self.dockProperties is None:
@@ -1927,9 +2548,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
     def _connect_property_editor(self, prop_name, editor, property_type):
         if property_type == "string":
             if isinstance(editor, QtWidgets.QTextEdit):
-                editor.textChanged.connect(lambda name=prop_name, w=editor: self.on_dynamic_property_changed(name, w.toPlainText()))
+                editor.textChanged.connect(lambda name=prop_name, w=editor: self.on_dynamic_property_changed(name, w.toPlainText(), defer_refresh=True))
             else:
-                editor.textEdited.connect(lambda value, name=prop_name: self.on_dynamic_property_changed(name, value))
+                editor.textEdited.connect(lambda value, name=prop_name: self.on_dynamic_property_changed(name, value, defer_refresh=True))
         elif property_type == "int":
             editor.valueChanged.connect(lambda value, name=prop_name: self.on_dynamic_property_changed(name, int(value)))
         elif property_type == "float":
@@ -2010,16 +2631,18 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self._property_editors[prop_def.name] = (prop_def, editor)
 
         self.refresh_table_editor(node_item)
-        self.refresh_stat_message_editor(node_item)
+        self.refresh_message_schema_editor(node_item)
         self.refresh_dynamic_ports_editor(node_item)
 
-    STAT_DYNAMIC_PORT_NODE_TYPES = {
-        'stat.sequence', 'stat.test_matrix', 'stat.data', 'stat.set_state', 'stat.set', 'stat.expect',
-    }
     DYNAMIC_PORT_DATA_TYPES = ['str', 'int', 'float', 'bool', 'bytes', 'complex', 'list', 'tuple', 'dict', 'set', 'NoneType']
 
     def _node_allows_dynamic_ports(self, node_item):
-        return bool(node_item is not None and getattr(node_item.node_data, 'node_type', None) in self.STAT_DYNAMIC_PORT_NODE_TYPES)
+        
+        if node_item is None:
+            return False
+        definition = getattr(node_item, 'definition', None)
+        metadata = getattr(definition, 'metadata', {}) or {}
+        return bool(metadata.get('allow_dynamic_ports'))
 
     def _node_allows_independent_paired_port_types(self, node_item):
         if node_item is None:
@@ -2028,7 +2651,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         metadata = getattr(definition, 'metadata', {}) or {}
         if metadata.get('independent_paired_port_types'):
             return True
-        return getattr(node_item.node_data, 'node_type', None) == 'stat.data'
+        return False
 
     def _dynamic_port_specs(self, node_item=None):
         node_item = node_item or self.selected_node_item
@@ -2040,6 +2663,13 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             specs = []
             props['__dynamic_ports'] = specs
         return specs
+
+    def _node_is_linked_subgraph_reference(self, node_item):
+        if node_item is None:
+            return False
+        props = getattr(getattr(node_item, 'node_data', None), 'properties', {}) or {}
+        mode = str(props.get('subgraph_source') or props.get('subgraph_mode') or 'embedded').strip().lower()
+        return mode == 'linked' and bool(self.linked_graph_policy_for_node(node_item))
 
     def _static_port_names(self, node_item, direction):
         definition = getattr(node_item, 'definition', None)
@@ -2064,6 +2694,14 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self.dynamicPortsGroup.setVisible(allow)
         if not allow:
             return
+        linked_read_only = self._node_is_linked_subgraph_reference(node_item)
+        self.btnAddInputPort.setEnabled(not linked_read_only)
+        self.btnAddOutputPort.setEnabled(not linked_read_only)
+        self.btnRemoveDynamicPort.setEnabled(not linked_read_only)
+        self.dynamicPortsTable.setEditTriggers(
+            QtWidgets.QAbstractItemView.NoEditTriggers if linked_read_only
+            else (QtWidgets.QAbstractItemView.DoubleClicked | QtWidgets.QAbstractItemView.EditKeyPressed | QtWidgets.QAbstractItemView.SelectedClicked)
+        )
         specs = self._dynamic_port_specs(node_item)
         self._dynamic_ports_updating = True
         self.dynamicPortsTable.blockSignals(True)
@@ -2079,6 +2717,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 combo_index = type_combo.findText(current_type)
                 type_combo.setCurrentIndex(max(combo_index, 0))
                 type_combo.setProperty('dynamic_port_id', spec.get('id'))
+                type_combo.setEnabled(not linked_read_only)
                 type_combo.currentTextChanged.connect(lambda value, combo=type_combo: self.on_dynamic_port_type_combo_changed(combo.property('dynamic_port_id'), value))
                 pair_item = QtWidgets.QTableWidgetItem(str(spec.get('pair_id') or ''))
                 pair_item.setFlags(pair_item.flags() & ~QtCore.Qt.ItemIsEditable)
@@ -2143,23 +2782,31 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
     def _sync_dynamic_ports_to_node(self, node_item):
         if node_item is None:
             return
-        captured_connections = self._connection_endpoints_for_node_rebuild(node_item)
-        static_inputs = self._static_port_names(node_item, 'input')
-        static_outputs = self._static_port_names(node_item, 'output')
-        specs = self._dynamic_port_specs(node_item)
-        dynamic_inputs = [str(spec.get('name') or 'Data') for spec in specs if spec.get('direction') == 'input']
-        dynamic_outputs = [str(spec.get('name') or 'Data') for spec in specs if spec.get('direction') == 'output']
-        node_item.rebuild_ports(inputs=static_inputs + dynamic_inputs, outputs=static_outputs + dynamic_outputs)
-        self._restore_connections_after_node_rebuild(captured_connections)
-        if hasattr(self, 'scene') and self.scene is not None:
-            self.scene.update()
+        if getattr(self, '_syncing_dynamic_ports', False):
+            return
+        self._syncing_dynamic_ports = True
+        try:
+            captured_connections = self._connection_endpoints_for_node_rebuild(node_item)
+            static_inputs = self._static_port_names(node_item, 'input')
+            static_outputs = self._static_port_names(node_item, 'output')
+            specs = self._dynamic_port_specs(node_item)
+            dynamic_inputs = [str(spec.get('name') or 'Data') for spec in specs if spec.get('direction') == 'input']
+            dynamic_outputs = [str(spec.get('name') or 'Data') for spec in specs if spec.get('direction') == 'output']
+            node_item.rebuild_ports(inputs=static_inputs + dynamic_inputs, outputs=static_outputs + dynamic_outputs)
+            self._restore_connections_after_node_rebuild(captured_connections)
+            if hasattr(self, 'scene') and self.scene is not None:
+                self.scene.update()
+        finally:
+            self._syncing_dynamic_ports = False
 
     def _new_dynamic_port_spec(self, direction, name, data_type='str', pair_id=''):
         return {'id': str(uuid.uuid4()), 'direction': direction, 'name': name, 'data_type': data_type, 'connection_kind': 'data', 'pair_id': pair_id or ''}
 
     def add_dynamic_input_pair(self):
         node_item = self.selected_node_item
-        if not self._node_allows_dynamic_ports(node_item):
+        if not self._node_allows_dynamic_ports(node_item) or self._node_is_linked_subgraph_reference(node_item):
+            if self._node_is_linked_subgraph_reference(node_item):
+                self._status_message("Linked subgraph port names are read-only. Open the linked graph file to edit ports.", 4500)
             return
         name = self._unique_dynamic_port_name(node_item, 'Data')
         pair_id = str(uuid.uuid4())
@@ -2172,7 +2819,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
 
     def add_dynamic_output_port(self):
         node_item = self.selected_node_item
-        if not self._node_allows_dynamic_ports(node_item):
+        if not self._node_allows_dynamic_ports(node_item) or self._node_is_linked_subgraph_reference(node_item):
+            if self._node_is_linked_subgraph_reference(node_item):
+                self._status_message("Linked subgraph port names are read-only. Open the linked graph file to edit ports.", 4500)
             return
         name = self._unique_dynamic_port_name(node_item, 'Data Out')
         specs = self._dynamic_port_specs(node_item)
@@ -2189,7 +2838,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
 
     def remove_selected_dynamic_port(self):
         node_item = self.selected_node_item
-        if not self._node_allows_dynamic_ports(node_item):
+        if not self._node_allows_dynamic_ports(node_item) or self._node_is_linked_subgraph_reference(node_item):
+            if self._node_is_linked_subgraph_reference(node_item):
+                self._status_message("Linked subgraph port names are read-only. Open the linked graph file to edit ports.", 4500)
             return
         row = self.dynamicPortsTable.currentRow()
         if row < 0:
@@ -2219,6 +2870,10 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         if self._dynamic_ports_updating or self.selected_node_item is None:
             return
         node_item = self.selected_node_item
+        if self._node_is_linked_subgraph_reference(node_item):
+            self._status_message("Linked subgraph port names are read-only. Open the linked graph file to edit ports.", 4500)
+            self.refresh_dynamic_ports_editor(node_item)
+            return
         specs = self._dynamic_port_specs(node_item)
         idx = self._find_dynamic_port_index_by_id(specs, port_id)
         if idx < 0:
@@ -2231,7 +2886,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 if other.get('pair_id') == pair_id:
                     other['data_type'] = new_value
         else:
-            # STAT Data nodes can model transformations/sources, so paired input/output
+            # Some domain nodes can model transformations/sources, so paired input/output
             # names stay linked while their data types may intentionally differ.
             spec['data_type'] = new_value
         self._sync_dynamic_ports_to_node(node_item)
@@ -2243,6 +2898,10 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         if self._dynamic_ports_updating or self.selected_node_item is None or item is None or item.column() != 1:
             return
         node_item = self.selected_node_item
+        if self._node_is_linked_subgraph_reference(node_item):
+            self._status_message("Linked subgraph port names are read-only. Open the linked graph file to edit ports.", 4500)
+            self.refresh_dynamic_ports_editor(node_item)
+            return
         specs = self._dynamic_port_specs(node_item)
         port_id = item.data(QtCore.Qt.UserRole)
         idx = self._find_dynamic_port_index_by_id(specs, port_id)
@@ -2379,15 +3038,24 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self.tableWidget.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.tableWidget.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
         self.tableWidget.verticalHeader().setDefaultSectionSize(26)
+        if hasattr(self.tableWidget, "_table_snapshot"):
+            self.tableWidget._last_table_snapshot = self.tableWidget._table_snapshot()
         self.tableWidget.viewport().update()
         self.tableWidget.update()
 
-    def on_dynamic_property_changed(self, prop_name, value):
+    def on_dynamic_property_changed(self, prop_name, value, defer_refresh=False):
         if self._updating_property_panel or self.selected_node_item is None:
             return
         self.selected_node_item.node_data.properties[prop_name] = value
         if prop_name in ("icd", "message_type", "topic"):
             self.refresh_stat_message_editor(self.selected_node_item)
+        if defer_refresh:
+            # Text editors emit changes on every character. Rebuilding the full
+            # property panel here destroys/recreates the active editor and makes
+            # the user lose focus after one keystroke. Persist the value and
+            # publish the updated selection payload without refreshing editors.
+            self.on_node_mutated(self.selected_node_item, refresh_properties=False)
+            return
         self.on_node_mutated(self.selected_node_item)
 
     def _sync_dynamic_property_values(self, node_item):
@@ -2410,14 +3078,27 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
     def _sync_table_node_ports(self, node_item):
         if node_item is None or node_item.node_data.node_type != "table.table_data":
             return
-        output_names = self._table_column_names(node_item)
-        node_item.rebuild_ports(inputs=[], outputs=output_names)
-        node_item.node_data.properties["columns"] = [
-            {"name": name, "type": "string"} for name in output_names
-        ]
-        node_item.update()
-        if hasattr(self, "scene") and self.scene is not None:
-            self.scene.update()
+        if getattr(self, '_syncing_table_ports', False):
+            return
+        self._syncing_table_ports = True
+        try:
+            captured_connections = self._connection_endpoints_for_node_rebuild(node_item)
+            existing_columns = list(node_item.node_data.properties.get("columns", []))
+            column_types = {str(col.get('name')): col.get('type', 'string') for col in existing_columns if isinstance(col, dict)}
+            output_names = self._table_column_names(node_item)
+            node_item.rebuild_ports(inputs=[], outputs=output_names)
+            # Preserve existing type metadata. Do not drop rows/default data here;
+            # this method is only responsible for keeping visual output ports in
+            # sync with column definitions.
+            node_item.node_data.properties["columns"] = [
+                {"name": name, "type": column_types.get(name, "string")} for name in output_names
+            ]
+            self._restore_connections_after_node_rebuild(captured_connections)
+            node_item.update()
+            if hasattr(self, "scene") and self.scene is not None:
+                self.scene.update()
+        finally:
+            self._syncing_table_ports = False
 
     def _sanitize_csv_header(self, header, index, existing):
         base = str(header or "").strip()
@@ -2567,29 +3248,92 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             return
         if self.selected_node_item.node_data.node_type != "table.table_data":
             return
+        # Keep the lightweight item path for direct edits; paste/structure edits
+        # are reconciled by the table-level signals below.
         columns = self.selected_node_item.node_data.properties.get("columns", [])
         rows = self.selected_node_item.node_data.properties.setdefault("rows", [])
         row_index = item.row()
         column_index = item.column()
-        if row_index < 0 or column_index < 0 or column_index >= len(columns):
+        if row_index < 0 or column_index < 0:
             return
+        while column_index >= len(columns):
+            columns.append({"name": f"Column {len(columns) + 1}", "type": "string"})
         while row_index >= len(rows):
             rows.append({})
         column_name = columns[column_index].get("name", f"column_{column_index + 1}")
         rows[row_index][column_name] = item.text()
 
+    def _sync_table_node_from_widget(self, *, sync_ports=False):
+        if self._table_editor_updating or self._updating_property_panel or self.selected_node_item is None:
+            return
+        if self.selected_node_item.node_data.node_type != "table.table_data":
+            return
+        headers = []
+        seen = set()
+        for column_index in range(self.tableWidget.columnCount()):
+            item = self.tableWidget.horizontalHeaderItem(column_index)
+            base = str(item.text() if item else f"Column {column_index + 1}").strip() or f"Column {column_index + 1}"
+            name = base
+            suffix = 2
+            while name in seen:
+                name = f"{base}_{suffix}"
+                suffix += 1
+            seen.add(name)
+            headers.append(name)
 
-    def _is_stat_message_node(self, node_item):
+        existing_columns = self.selected_node_item.node_data.properties.get("columns", [])
+        type_by_name = {str(col.get("name")): col.get("type", "string") for col in existing_columns if isinstance(col, dict)}
+        self.selected_node_item.node_data.properties["columns"] = [
+            {"name": name, "type": type_by_name.get(name, "string")} for name in headers
+        ]
+
+        rows = []
+        for row_index in range(self.tableWidget.rowCount()):
+            row_data = {}
+            for column_index, column_name in enumerate(headers):
+                item = self.tableWidget.item(row_index, column_index)
+                row_data[column_name] = item.text() if item else ""
+            rows.append(row_data)
+        self.selected_node_item.node_data.properties["rows"] = rows
+
+        if sync_ports:
+            self._sync_table_node_ports(self.selected_node_item)
+        self.on_node_mutated(self.selected_node_item, refresh_properties=False)
+
+    def on_table_widget_data_changed(self):
+        self._sync_table_node_from_widget(sync_ports=False)
+
+    def on_table_widget_structure_changed(self):
+        self._sync_table_node_from_widget(sync_ports=True)
+
+    def on_table_widget_column_renamed(self, column_index, old_name, new_name):
+        # NexusTableEditor has already updated the header. Reconcile the graph
+        # node schema and output ports from the table widget as source of truth.
+        self._sync_table_node_from_widget(sync_ports=True)
+
+
+
+    def table_editor_policy(self):
+        return {
+            'show_rename_button': True,
+            'enable_sorting': True,
+            'enable_filtering': True,
+        }
+
+    def message_schema_catalog_for_node(self, node_item):
+        return {}
+
+    def _node_uses_message_schema_editor(self, node_item):
         definition = getattr(node_item, "definition", None)
         metadata = getattr(definition, "metadata", {}) or {}
-        return bool(metadata.get("stat_message_tree"))
+        return bool(metadata.get("message_schema_editor"))
 
-    def _stat_tree_mode(self, node_item):
+    def _message_schema_tree_mode(self, node_item):
         definition = getattr(node_item, "definition", None)
         metadata = getattr(definition, "metadata", {}) or {}
-        return str(metadata.get("stat_tree_mode") or "expect")
+        return str(metadata.get("message_schema_mode") or "expect")
 
-    def _stat_selected_fields(self, node_item):
+    def _message_schema_selected_fields(self, node_item):
         raw = (node_item.node_data.properties or {}).get("field_selections", {})
         if isinstance(raw, dict):
             return raw
@@ -2598,44 +3342,44 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         except Exception:
             return {}
 
-    def _save_stat_selected_fields(self, node_item, selections):
+    def _save_message_schema_selected_fields(self, node_item, selections):
         node_item.node_data.properties["field_selections"] = json.dumps(selections or {}, indent=2, sort_keys=True)
         editor_tuple = getattr(self, "_property_editors", {}).get("field_selections")
         if editor_tuple:
             prop_def, editor = editor_tuple
             self._set_editor_value(editor, prop_def, node_item.node_data.properties["field_selections"])
 
-    def refresh_stat_message_editor(self, node_item):
-        if not hasattr(self, "statMessageGroup"):
+    def refresh_message_schema_editor(self, node_item):
+        if not hasattr(self, "messageSchemaGroup"):
             return
-        is_stat = self._is_stat_message_node(node_item)
-        self.statMessageGroup.setVisible(is_stat)
-        self.statMessageTree.clear()
-        if not is_stat:
+        enabled = self._node_uses_message_schema_editor(node_item)
+        self.messageSchemaGroup.setVisible(enabled)
+        self.messageSchemaTree.clear()
+        if not enabled:
             return
         message_type = str((node_item.node_data.properties or {}).get("message_type") or "RedundancyStatus")
-        schema = STAT_MESSAGE_SCHEMAS.get(message_type) or {}
-        mode = self._stat_tree_mode(node_item)
-        self.statTreeHint.setText(
+        schema = self.message_schema_catalog_for_node(node_item).get(message_type) or {}
+        mode = self._message_schema_tree_mode(node_item)
+        self.messageSchemaHint.setText(
             "Set mode: check primitive fields and enter values to be assigned."
             if mode == "set" else
             "Expect mode: check primitive fields to verify later."
         )
-        selections = self._stat_selected_fields(node_item)
-        self._stat_tree_updating = True
+        selections = self._message_schema_selected_fields(node_item)
+        self._message_schema_tree_updating = True
         try:
             root = QtWidgets.QTreeWidgetItem([message_type, "class", ""])
             root.setData(0, QtCore.Qt.UserRole, "")
             root.setFlags(root.flags() | QtCore.Qt.ItemIsEnabled)
-            self.statMessageTree.addTopLevelItem(root)
-            self._populate_stat_schema_tree(root, schema, "", selections, mode)
+            self.messageSchemaTree.addTopLevelItem(root)
+            self._populate_message_schema_tree(root, schema, "", selections, mode)
             root.setExpanded(True)
-            self.statMessageTree.resizeColumnToContents(0)
-            self.statMessageTree.resizeColumnToContents(1)
+            self.messageSchemaTree.resizeColumnToContents(0)
+            self.messageSchemaTree.resizeColumnToContents(1)
         finally:
-            self._stat_tree_updating = False
+            self._message_schema_tree_updating = False
 
-    def _populate_stat_schema_tree(self, parent_item, schema, prefix, selections, mode):
+    def _populate_message_schema_tree(self, parent_item, schema, prefix, selections, mode):
         if not isinstance(schema, dict):
             return
         for name, value in schema.items():
@@ -2644,7 +3388,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 item = QtWidgets.QTreeWidgetItem([name, "class", ""])
                 item.setData(0, QtCore.Qt.UserRole, path)
                 parent_item.addChild(item)
-                self._populate_stat_schema_tree(item, value, path, selections, mode)
+                self._populate_message_schema_tree(item, value, path, selections, mode)
             else:
                 item = QtWidgets.QTreeWidgetItem([name, str(value), ""])
                 item.setData(0, QtCore.Qt.UserRole, path)
@@ -2659,16 +3403,16 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                         item.setText(2, str(selected))
                 parent_item.addChild(item)
 
-    def on_stat_tree_item_changed(self, item, column):
-        if getattr(self, "_stat_tree_updating", False) or self.selected_node_item is None:
+    def on_message_schema_tree_item_changed(self, item, column):
+        if getattr(self, "_message_schema_tree_updating", False) or self.selected_node_item is None:
             return
-        if not self._is_stat_message_node(self.selected_node_item):
+        if not self._node_uses_message_schema_editor(self.selected_node_item):
             return
         path = item.data(0, QtCore.Qt.UserRole)
         if not path or item.childCount() > 0:
             return
-        mode = self._stat_tree_mode(self.selected_node_item)
-        selections = self._stat_selected_fields(self.selected_node_item)
+        mode = self._message_schema_tree_mode(self.selected_node_item)
+        selections = self._message_schema_selected_fields(self.selected_node_item)
         if item.checkState(0) == QtCore.Qt.Checked:
             if mode == "set":
                 selections[path] = {"path": path, "value": item.text(2), "type": item.text(1)}
@@ -2678,7 +3422,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             selections.pop(path, None)
             if mode == "set":
                 item.setText(2, "")
-        self._save_stat_selected_fields(self.selected_node_item, selections)
+        self._save_message_schema_selected_fields(self.selected_node_item, selections)
         self.on_node_mutated(self.selected_node_item)
 
     def _build_local_menus(self):
@@ -2722,6 +3466,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         else:
             self._ensure_current_graph_control_flow_nodes()
         self._refresh_node_view_ui()
+        self.schedule_validation_update()
         self.set_editor_title(self._editor_title)
         if announce:
             label = view_definition.name if view_definition is not None else "Not Selected"
@@ -3042,6 +3787,240 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._initial_fit_pending = True
         QtCore.QTimer.singleShot(0, self._ensure_initial_fit)
 
+
+    def _selected_layout_items(self):
+        """Return selected objects that participate in manual layout tools.
+
+        Normal nodes are moved directly. Expanded inline subgraphs participate as
+        their boundary item, which keeps the read-only internal projection moving
+        as one group without making the child nodes editable.
+        """
+        ordered = []
+        if hasattr(self.scene, 'ordered_selected_items'):
+            ordered = self.scene.ordered_selected_items()
+        else:
+            ordered = self.scene.selectedItems()
+        items = []
+        for item in ordered:
+            if isinstance(item, NodeItem):
+                if getattr(item, '_inline_subgraph_display', False):
+                    continue
+                if not bool(item.flags() & QtWidgets.QGraphicsItem.ItemIsMovable):
+                    continue
+                items.append(item)
+            elif isinstance(item, InlineSubgraphBoundaryItem):
+                items.append(item)
+        return items
+
+    def _layout_item_pos(self, item):
+        if isinstance(item, InlineSubgraphBoundaryItem):
+            expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(item.container_node_id)
+            container = expansion.get('container_node') if expansion else None
+            if container is not None:
+                return QtCore.QPointF(container.pos())
+        return QtCore.QPointF(item.pos())
+
+    def _push_layout_moves(self, moves, label):
+        if not moves:
+            return False
+        changed = [(item, old_pos, new_pos) for item, old_pos, new_pos in moves if old_pos != new_pos]
+        if not changed:
+            return False
+        self._show_layout_ghost_preview([(item, new_pos) for item, _old, new_pos in changed])
+        self.undo_stack.beginMacro(label)
+        try:
+            for item, old_pos, new_pos in changed:
+                if isinstance(item, InlineSubgraphBoundaryItem):
+                    self.undo_stack.push(MoveInlineExpansionCommand(self, item.container_node_id, old_pos, new_pos))
+                elif isinstance(item, NodeItem):
+                    self.undo_stack.push(MoveNodeCommand(item, old_pos, new_pos))
+        finally:
+            self.undo_stack.endMacro()
+        self.scene.update()
+        return True
+
+    def _show_layout_ghost_preview(self, targets, duration_ms=550):
+        """Briefly show translucent target boxes for manual layout operations."""
+        existing = getattr(self, '_layout_ghost_items', []) or []
+        for ghost in existing:
+            try:
+                self.scene.removeItem(ghost)
+            except RuntimeError:
+                pass
+        self._layout_ghost_items = []
+        theme = getattr(self.scene, 'theme', {}) or {}
+        pen_color = QtGui.QColor(theme.get('node_selected', theme.get('accent', '#6aa9ff')))
+        brush_color = QtGui.QColor(pen_color)
+        brush_color.setAlpha(42)
+        for item, new_pos in targets:
+            try:
+                rect = QtCore.QRectF(item.sceneBoundingRect())
+                old_pos = self._layout_item_pos(item)
+                delta = QtCore.QPointF(new_pos - old_pos)
+                rect.translate(delta)
+            except RuntimeError:
+                continue
+            ghost = QtWidgets.QGraphicsRectItem(rect)
+            ghost.setZValue(5000)
+            ghost.setPen(QtGui.QPen(pen_color, 1.6, QtCore.Qt.DashLine))
+            ghost.setBrush(QtGui.QBrush(brush_color))
+            ghost.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+            ghost._layout_ghost_preview = True
+            self.scene.addItem(ghost)
+            self._layout_ghost_items.append(ghost)
+        if self._layout_ghost_items:
+            QtCore.QTimer.singleShot(duration_ms, self._clear_layout_ghost_preview)
+
+    def _clear_layout_ghost_preview(self):
+        for ghost in list(getattr(self, '_layout_ghost_items', []) or []):
+            try:
+                self.scene.removeItem(ghost)
+            except RuntimeError:
+                pass
+        self._layout_ghost_items = []
+
+    def _layout_item_rect_at(self, item, new_pos):
+        rect = QtCore.QRectF(item.sceneBoundingRect())
+        old_pos = self._layout_item_pos(item)
+        rect.translate(QtCore.QPointF(new_pos - old_pos))
+        return rect
+
+    def _prevent_alignment_overlap(self, items, proposed_positions, alignment, gap=24.0):
+        """Keep manual alignment from stacking nodes on top of each other.
+
+        Alignment still locks the requested edge/center to the anchor, but it
+        also preserves a readable lane on the perpendicular axis.  This keeps
+        the operation surgical and predictable without becoming auto-layout.
+        """
+        if not items:
+            return proposed_positions
+        anchor = items[0]
+        alignment = str(alignment or '').lower()
+        vertical_lane = alignment in ('left', 'right', 'center', 'center_x', 'horizontal_center')
+        ordered = sorted(enumerate(items), key=lambda pair: (
+            pair[1].sceneBoundingRect().center().y() if vertical_lane else pair[1].sceneBoundingRect().center().x(),
+            pair[0],
+        ))
+        ordered_items = [item for _index, item in ordered]
+        if anchor not in ordered_items:
+            return proposed_positions
+        anchor_index = ordered_items.index(anchor)
+
+        rects = {item: self._layout_item_rect_at(item, proposed_positions[item]) for item in items}
+
+        # Walk forward from the anchor.  Push later items down/right only when
+        # the aligned result would overlap the previous item.
+        previous = rects[anchor]
+        for item in ordered_items[anchor_index + 1:]:
+            rect = rects[item]
+            if vertical_lane:
+                delta = previous.bottom() + gap - rect.top()
+                if delta > 0:
+                    proposed_positions[item] = QtCore.QPointF(proposed_positions[item].x(), proposed_positions[item].y() + delta)
+                    rect.translate(0.0, delta)
+            else:
+                delta = previous.right() + gap - rect.left()
+                if delta > 0:
+                    proposed_positions[item] = QtCore.QPointF(proposed_positions[item].x() + delta, proposed_positions[item].y())
+                    rect.translate(delta, 0.0)
+            rects[item] = rect
+            previous = rect
+
+        # Walk backward from the anchor.  Push earlier items up/left only when
+        # the aligned result would overlap the next item.
+        next_rect = rects[anchor]
+        for item in reversed(ordered_items[:anchor_index]):
+            rect = rects[item]
+            if vertical_lane:
+                delta = next_rect.top() - gap - rect.bottom()
+                if delta < 0:
+                    proposed_positions[item] = QtCore.QPointF(proposed_positions[item].x(), proposed_positions[item].y() + delta)
+                    rect.translate(0.0, delta)
+            else:
+                delta = next_rect.left() - gap - rect.right()
+                if delta < 0:
+                    proposed_positions[item] = QtCore.QPointF(proposed_positions[item].x() + delta, proposed_positions[item].y())
+                    rect.translate(delta, 0.0)
+            rects[item] = rect
+            next_rect = rect
+
+        return proposed_positions
+
+    def align_selected_nodes(self, alignment):
+        items = self._selected_layout_items()
+        if len(items) < 2:
+            self._status_message('Select at least two movable nodes or expanded sub-graphs to align.', 2500)
+            return False
+        anchor = items[0]
+        alignment = str(alignment or '').lower()
+        anchor_rect = anchor.sceneBoundingRect()
+        proposed = {anchor: self._layout_item_pos(anchor)}
+        for item in items[1:]:
+            rect = item.sceneBoundingRect()
+            old = self._layout_item_pos(item)
+            if alignment == 'left':
+                new_pos = QtCore.QPointF(old.x() + (anchor_rect.left() - rect.left()), old.y())
+            elif alignment == 'right':
+                new_pos = QtCore.QPointF(old.x() + (anchor_rect.right() - rect.right()), old.y())
+            elif alignment in ('center', 'center_x', 'horizontal_center'):
+                new_pos = QtCore.QPointF(old.x() + (anchor_rect.center().x() - rect.center().x()), old.y())
+            elif alignment == 'top':
+                new_pos = QtCore.QPointF(old.x(), old.y() + (anchor_rect.top() - rect.top()))
+            elif alignment == 'bottom':
+                new_pos = QtCore.QPointF(old.x(), old.y() + (anchor_rect.bottom() - rect.bottom()))
+            elif alignment in ('middle', 'center_y', 'vertical_center'):
+                new_pos = QtCore.QPointF(old.x(), old.y() + (anchor_rect.center().y() - rect.center().y()))
+            else:
+                return False
+            proposed[item] = new_pos
+
+        proposed = self._prevent_alignment_overlap(items, proposed, alignment)
+        moves = [(item, self._layout_item_pos(item), proposed[item]) for item in items[1:]]
+        changed = self._push_layout_moves(moves, 'Align Layout Items')
+        if changed:
+            label = getattr(getattr(anchor, 'node_data', None), 'title', None) or getattr(anchor, 'title', 'anchor')
+            self._status_message(f'Aligned selected items to anchor without stacking: {label}.', 1800)
+        return changed
+
+    def distribute_selected_nodes(self, orientation):
+        items = self._selected_layout_items()
+        if len(items) < 3:
+            self._status_message('Select at least three movable nodes or expanded sub-graphs to distribute.', 2500)
+            return False
+        orientation = str(orientation or '').lower()
+        if orientation == 'horizontal':
+            ordered = sorted(items, key=lambda item: item.sceneBoundingRect().center().x())
+            centers = [item.sceneBoundingRect().center().x() for item in ordered]
+            start, end = centers[0], centers[-1]
+            if abs(end - start) < 0.0001:
+                return False
+            step = (end - start) / float(len(ordered) - 1)
+            moves = []
+            for index, item in enumerate(ordered):
+                rect = item.sceneBoundingRect()
+                old = self._layout_item_pos(item)
+                target_center = start + step * index
+                moves.append((item, old, QtCore.QPointF(old.x() + (target_center - rect.center().x()), old.y())))
+        elif orientation == 'vertical':
+            ordered = sorted(items, key=lambda item: item.sceneBoundingRect().center().y())
+            centers = [item.sceneBoundingRect().center().y() for item in ordered]
+            start, end = centers[0], centers[-1]
+            if abs(end - start) < 0.0001:
+                return False
+            step = (end - start) / float(len(ordered) - 1)
+            moves = []
+            for index, item in enumerate(ordered):
+                rect = item.sceneBoundingRect()
+                old = self._layout_item_pos(item)
+                target_center = start + step * index
+                moves.append((item, old, QtCore.QPointF(old.x(), old.y() + (target_center - rect.center().y()))))
+        else:
+            return False
+        changed = self._push_layout_moves(moves, 'Distribute Layout Items')
+        if changed:
+            self._status_message('Distributed selected layout items.', 1800)
+        return changed
+
     def add_node_from_toolbar(self):
         if self.active_node_view() is None:
             self._centralStack.setCurrentWidget(self._viewSelectionSurface)
@@ -3064,6 +4043,31 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             center,
             node_type=preferred_type
         ))
+
+    def rename_node_via_dialog(self, node_item=None):
+        node_item = node_item or self.selected_node_item
+        if node_item is None:
+            return False
+        if getattr(node_item, '_inline_subgraph_display', False):
+            self._status_message("Expanded sub-graph previews are read-only. Open the sub-graph to rename nodes.", 3000)
+            return False
+        old_title = str(getattr(node_item.node_data, 'title', '') or '')
+        new_title, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Rename Node",
+            "Node name:",
+            QtWidgets.QLineEdit.Normal,
+            old_title,
+        )
+        new_title = str(new_title or '').strip()
+        if not ok or not new_title or new_title == old_title:
+            return False
+        if not node_item.isSelected():
+            self.scene.clearSelection()
+            node_item.setSelected(True)
+        self.selected_node_item = node_item
+        self.undo_stack.push(RenameNodeCommand(node_item, old_title, new_title))
+        return True
 
     def center_view(self):
         self.graphView.centerOn(0, 0)
@@ -3092,7 +4096,12 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
     def _serialize_clipboard_snapshot(self, snapshot):
         if not snapshot:
             return ''
-        return json.dumps(snapshot, indent=2)
+        try:
+            return json.dumps(graph_json_safe(snapshot), indent=2)
+        except Exception:
+            # Copy should fail closed instead of placing a bad payload on the
+            # clipboard. Callers treat an empty payload as no-copy.
+            return ''
 
     def copy(self):
         snapshot = self._selected_graph_snapshot()
@@ -3101,6 +4110,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         clipboard = QtWidgets.QApplication.clipboard()
         mime = QtCore.QMimeData()
         payload = self._serialize_clipboard_snapshot(snapshot)
+        if not payload:
+            self._status_message('Copy failed: selected graph data could not be serialized.', 4000)
+            return False
         mime.setData(self._clipboard_mime_type, payload.encode('utf-8'))
         mime.setText(payload)
         clipboard.setMimeData(mime)
@@ -3166,41 +4178,11 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._paste_sequence += 1
         dx = offset_step * self._paste_sequence
         dy = offset_step * self._paste_sequence
-        id_map = {}
-        new_nodes = []
-        for node_entry in snapshot.get('nodes', []):
-            node_data = dict(node_entry.get('node_data', {}))
-            old_id = node_data.get('node_id')
-            new_entry = create_node_entry(
-                node_type=node_data.get('node_type', 'generic'),
-                pos=QtCore.QPointF(float(node_data.get('x', 0.0)) + dx, float(node_data.get('y', 0.0)) + dy),
-                title=node_data.get('title'),
-                properties=dict(node_data.get('properties', {})),
-                inputs=list(node_entry.get('inputs', [])),
-                outputs=list(node_entry.get('outputs', [])),
-            )
-            if old_id:
-                id_map[old_id] = new_entry.get('node_data', {}).get('node_id')
-            new_nodes.append(new_entry)
-
-        new_connections = []
-        for conn_entry in snapshot.get('connections', []):
-            source_id = id_map.get(conn_entry.get('source_node_id'))
-            target_id = id_map.get(conn_entry.get('target_node_id'))
-            if not source_id or not target_id:
-                continue
-            route_points = []
-            for point in conn_entry.get('route_points', []):
-                if isinstance(point, (list, tuple)) and len(point) >= 2:
-                    route_points.append((float(point[0]) + dx, float(point[1]) + dy))
-            new_connections.append({
-                'source_node_id': source_id,
-                'source_port_name': conn_entry.get('source_port_name'),
-                'target_node_id': target_id,
-                'target_port_name': conn_entry.get('target_port_name'),
-                'route_points': route_points,
-            })
-        return {'nodes': new_nodes, 'connections': new_connections}
+        try:
+            return GraphIdRewriter.rewrite_snapshot(snapshot, dx=dx, dy=dy)
+        except Exception as exc:
+            self._status_message(f'Paste failed while regenerating graph IDs: {exc}', 5000)
+            return {'nodes': [], 'connections': []}
 
     def paste(self):
         clipboard = QtWidgets.QApplication.clipboard()
@@ -3229,6 +4211,92 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         if not pasted.get('nodes'):
             return False
         self.undo_stack.push(PasteItemsCommand(self.scene, pasted))
+        return True
+
+
+    # ------------------------------------------------------------------
+    # Shared graph templates
+    # ------------------------------------------------------------------
+    def save_selection_as_template(self):
+        snapshot = self._selected_graph_snapshot()
+        if not snapshot or not snapshot.get('nodes'):
+            self._status_message('Select one or more nodes to save as a template.', 4000)
+            return False
+        name, ok = QtWidgets.QInputDialog.getText(self, 'Save Graph Template', 'Template name:')
+        if not ok:
+            return False
+        name = str(name or '').strip()
+        if not name:
+            self._status_message('Template was not saved: name is required.', 4000)
+            return False
+        try:
+            summary = self.template_service.save_template(name, snapshot)
+        except Exception as exc:
+            self._status_message(f'Template save failed: {exc}', 6000)
+            return False
+        self._status_message(f'Saved template: {summary.name}', 4000)
+        return True
+
+
+    def configure_template_libraries(self):
+        """Configure shared graph template repositories.
+
+        The shared framework owns repository discovery/persistence. Domain
+        plugins only constrain compatibility through active graph views and node
+        registries.
+        """
+        service = getattr(self, 'template_service', None)
+        if service is None:
+            self._status_message('Template service is not available.', 4000)
+            return False
+
+        current_save = str(service.save_repository)
+        save_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            'Select Template Save Repository',
+            current_save,
+        )
+        if save_dir:
+            try:
+                service.set_save_repository(save_dir)
+            except Exception as exc:
+                self._status_message(f'Template repository update failed: {exc}', 6000)
+                return False
+
+        current_loads = '\n'.join(str(path) for path in service.load_repositories())
+        load_text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self,
+            'Template Load Libraries',
+            'Template library folders, one path per line:',
+            current_loads,
+        )
+        if ok:
+            paths = [line.strip() for line in str(load_text or '').splitlines() if line.strip()]
+            try:
+                service.set_load_repositories(paths)
+            except Exception as exc:
+                self._status_message(f'Template library update failed: {exc}', 6000)
+                return False
+        self._status_message(
+            'Template libraries updated. Save: %s | Loaded paths: %d' % (service.save_repository, len(service.load_repositories())),
+            5000,
+        )
+        return True
+
+    def insert_template(self, template_id, scene_pos):
+        if not template_id:
+            return False
+        try:
+            snapshot = self.template_service.materialize_template(template_id, scene_pos)
+        except Exception as exc:
+            self._status_message(f'Template insert failed: {exc}', 6000)
+            return False
+        snapshot, blocked_types = self._filter_snapshot_to_active_view(snapshot)
+        if blocked_types:
+            self._status_message(f"Skipped nodes blocked by the active {self.graph_view_label}: %s" % ", ".join(blocked_types), 5000)
+        if not snapshot.get('nodes'):
+            return False
+        self.undo_stack.push(PasteItemsCommand(self.scene, snapshot))
         return True
 
     def delete_selected_items(self):
@@ -3270,6 +4338,113 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self.undo_stack.push(DeleteItemsCommand(self.scene, snapshot))
         return True
 
+
+    # ------------------------------------------------------------------
+    # Shared graph visual path highlighting
+    # ------------------------------------------------------------------
+    def clear_visual_path_highlighting(self):
+        """Clear static authoring path highlights without touching runtime feedback."""
+        if hasattr(self.scene, 'clear_path_highlighting'):
+            self.scene.clear_path_highlighting()
+        else:
+            for item in self.scene.items():
+                if hasattr(item, 'set_path_highlight_state'):
+                    item.set_path_highlight_state('normal')
+
+    def _visible_connection_items(self):
+        items = []
+        for item in self.scene.items():
+            if not isinstance(item, ConnectionItem):
+                continue
+            if not item.isVisible():
+                continue
+            if getattr(item, 'preview_mode', False):
+                continue
+            if getattr(item, 'source_port', None) is None or getattr(item, 'target_port', None) is None:
+                continue
+            items.append(item)
+        return items
+
+    def _node_for_port(self, port):
+        return getattr(port, 'parent_node', None) if port is not None else None
+
+    def _apply_node_path_state(self, node, state):
+        if node is None or not hasattr(node, 'set_path_highlight_state'):
+            return
+        current = getattr(node, 'path_highlight_state', 'normal')
+        if current == 'path_origin':
+            return
+        if current == 'path_exec' and state == 'path_data':
+            return
+        node.set_path_highlight_state(state)
+
+    def apply_visual_path_highlighting(self, origin_node):
+        """Highlight static downstream execution flow and connected data flow.
+
+        This is an authoring visualization only.  It does not evaluate node logic,
+        mutate graph data, or invoke any domain/runtime behavior.  The shared
+        framework uses generic connection kinds: ``exec`` is traversed forward,
+        while ``data`` is traced as an undirected dependency network.
+        """
+        self.clear_visual_path_highlighting()
+        if origin_node is None:
+            return False
+        if hasattr(origin_node, 'set_path_highlight_state'):
+            origin_node.set_path_highlight_state('path_origin')
+
+        exec_adjacency = {}
+        data_adjacency = {}
+        exec_connections = {}
+        data_connections = {}
+
+        for conn in self._visible_connection_items():
+            source = self._node_for_port(getattr(conn, 'source_port', None))
+            target = self._node_for_port(getattr(conn, 'target_port', None))
+            if source is None or target is None:
+                continue
+            kind = str(conn.connection_kind() if hasattr(conn, 'connection_kind') else 'data').lower()
+            if kind == 'exec':
+                exec_adjacency.setdefault(source, []).append(target)
+                exec_connections.setdefault(source, []).append(conn)
+            else:
+                data_adjacency.setdefault(source, []).append((target, conn))
+                data_adjacency.setdefault(target, []).append((source, conn))
+                data_connections.setdefault(source, []).append(conn)
+                data_connections.setdefault(target, []).append(conn)
+
+        # Execution is directional and should read like program flow.
+        visited = set([origin_node])
+        stack = list(exec_adjacency.get(origin_node, []))
+        for conn in exec_connections.get(origin_node, []):
+            conn.set_path_highlight_state('path_exec')
+        while stack:
+            node = stack.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+            self._apply_node_path_state(node, 'path_exec')
+            for conn in exec_connections.get(node, []):
+                conn.set_path_highlight_state('path_exec')
+            stack.extend(exec_adjacency.get(node, []))
+
+        # Data is a dependency network, so trace it both upstream and downstream.
+        visited_data = set([origin_node])
+        stack = list(data_adjacency.get(origin_node, []))
+        for conn in data_connections.get(origin_node, []):
+            conn.set_path_highlight_state('path_data')
+        while stack:
+            node, via_conn = stack.pop(0)
+            if via_conn is not None:
+                via_conn.set_path_highlight_state('path_data')
+            if node in visited_data:
+                continue
+            visited_data.add(node)
+            self._apply_node_path_state(node, 'path_data')
+            stack.extend(data_adjacency.get(node, []))
+
+        self.scene.update()
+        return True
+
     def on_selection_changed(self):
         items = self.scene.selectedItems()
         node_item = next((item for item in items if isinstance(item, NodeItem)), None)
@@ -3287,6 +4462,10 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self._stabilize_properties_dock_width(previous_width=previous_width)
 
         self._publish_selection_to_data_store(node_item)
+        if node_item is None:
+            self.clear_visual_path_highlighting()
+        else:
+            self.apply_visual_path_highlighting(node_item)
         self.selectionChanged.emit(node_item)
 
 
@@ -3469,8 +4648,8 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._clear_form_layout(self.dynamicPropertiesForm)
         self._property_editors = {}
         self.tableEditorGroup.hide()
-        if hasattr(self, 'statMessageGroup'):
-            self.statMessageGroup.hide()
+        if hasattr(self, 'messageSchemaGroup'):
+            self.messageSchemaGroup.hide()
         if hasattr(self, 'dynamicPortsGroup'):
             self.dynamicPortsGroup.hide()
         if hasattr(self, 'subgraphSourceGroup'):
@@ -3519,19 +4698,85 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             return
 
         self.undo_stack.push(RenameNodeCommand(self.selected_node_item, old_title, new_title))
-        self.set_editor_title(new_title)
 
+
+    def _view_id_from_graph_extension(self, graph_data=None, file_path=None):
+        """Infer graph view from saved extension metadata or a file path."""
+        ext = ""
+        metadata = graph_data.get("metadata") if isinstance(graph_data, dict) else None
+        if isinstance(metadata, dict):
+            ext = str(metadata.get("graph_file_extension") or "").strip()
+        if not ext and file_path:
+            ext = Path(str(file_path)).suffix
+        if not ext:
+            return None
+        if not ext.startswith("."):
+            ext = "." + ext
+        ext = ext.lower()
+        for view in self.available_node_views():
+            view_ext = self.graph_file_extension_for_view_id(view.view_id)
+            if view_ext and not view_ext.startswith("."):
+                view_ext = "." + view_ext
+            if str(view_ext or "").lower() == ext:
+                return view.view_id
+        return None
+
+    def _node_view_id_for_graph_payload(self, graph_data, file_path=None, fallback_view_id=None):
+        """Return the node-view/graph-type that belongs to a graph payload.
+
+        Session restore can occur while the user had an embedded sub-graph open
+        at shutdown. In that case the visible/root graph payload and the active
+        editor context can disagree. The graph payload is the source of truth.
+
+        Older unsaved session payloads may be missing metadata. For those, infer
+        from graph/file extension first, then from node compatibility using the
+        tool-specific default before generic/alphabetic view order.
+        """
+        metadata = graph_data.get("metadata") if isinstance(graph_data, dict) else None
+        if isinstance(metadata, dict):
+            view_id = metadata.get("active_node_view_id")
+            if view_id and self._view_id_allowed_for_tool(view_id):
+                registry = self._registry_for_view_id(view_id)
+                if not isinstance(graph_data, dict) or not graph_data.get("nodes") or not self._disallowed_node_types_in_graph_data(graph_data, registry=registry):
+                    return view_id
+
+        extension_view_id = self._view_id_from_graph_extension(graph_data, file_path=file_path)
+        if extension_view_id:
+            registry = self._registry_for_view_id(extension_view_id)
+            if not isinstance(graph_data, dict) or not graph_data.get("nodes") or not self._disallowed_node_types_in_graph_data(graph_data, registry=registry):
+                return extension_view_id
+
+        if isinstance(graph_data, dict) and graph_data.get("nodes"):
+            return self._find_compatible_view_id_for_graph_data(graph_data, preferred_view_id=fallback_view_id)
+        if fallback_view_id and self._view_id_allowed_for_tool(fallback_view_id):
+            return fallback_view_id
+        if self._active_node_view_id and self._view_id_allowed_for_tool(self._active_node_view_id):
+            return self._active_node_view_id
+        return getattr(self, "graph_default_node_view_id", None)
 
     def save_state(self):
         graph_data = self._save_current_graph_context() if self._graph_context_stack else (self.collapse_all_inline_subgraphs() or self.scene.serialize_graph())
         if self._graph_context_stack and self._root_graph_data is not None:
             graph_data = self._root_graph_data
+            root_view_id = None
+            if self._graph_context_stack:
+                root_view_id = self._graph_context_stack[0].get("parent_view_id")
+            metadata = graph_data.setdefault("metadata", {}) if isinstance(graph_data, dict) else {}
+            if isinstance(metadata, dict) and root_view_id:
+                metadata["active_node_view_id"] = root_view_id
+        self._write_bookmark_metadata_to_graph(graph_data)
+        active_view_id = self._node_view_id_for_graph_payload(graph_data, file_path=self.current_file_path, fallback_view_id=self._active_node_view_id)
+        if isinstance(graph_data, dict) and active_view_id:
+            metadata = graph_data.setdefault("metadata", {})
+            if isinstance(metadata, dict):
+                metadata["active_node_view_id"] = active_view_id
+                metadata["graph_file_extension"] = self.graph_file_extension_for_view_id(active_view_id)
         return {
             "editor_title": self.editor_title(),
             "current_file_path": self.current_file_path,
             "properties_visible": self.dockProperties.isVisible(),
             "graph": graph_data,
-            "active_node_view_id": self._active_node_view_id,
+            "active_node_view_id": active_view_id,
         }
 
     def load_state(self, state):
@@ -3542,11 +4787,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self._refresh_node_view_ui()
             return
         graph_data = state.get("graph")
-        active_view_id = state.get("active_node_view_id")
-        if graph_data:
-            metadata = graph_data.get("metadata") if isinstance(graph_data, dict) else None
-            if active_view_id is None and isinstance(metadata, dict):
-                active_view_id = metadata.get("active_node_view_id")
+        # The restored graph payload is authoritative. The saved active view can
+        # be stale when the application was closed from inside a sub-graph.
+        active_view_id = self._node_view_id_for_graph_payload(graph_data, file_path=state.get("current_file_path"), fallback_view_id=state.get("active_node_view_id")) if graph_data else state.get("active_node_view_id")
         self.current_file_path = state.get("current_file_path")
         if active_view_id is not None:
             self.set_active_node_view(active_view_id, announce=False, ignore_lock=True)
@@ -3556,6 +4799,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         else:
             self._refresh_node_view_ui()
         if graph_data:
+            metadata = graph_data.setdefault("metadata", {}) if isinstance(graph_data, dict) else {}
+            if isinstance(metadata, dict) and active_view_id:
+                metadata["active_node_view_id"] = active_view_id
             if active_view_id is None and graph_data.get("nodes"):
                 compatible_view_id = self._find_compatible_view_id_for_graph_data(graph_data)
                 if compatible_view_id is not None:
@@ -3575,8 +4821,17 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self.scene._suspend_undo = True
             try:
                 self.scene.load_graph(self._ensure_graph_control_flow_nodes(graph_data))
+                self._set_graph_bookmarks_from_payload(graph_data)
             finally:
                 self.scene._suspend_undo = False
+            if self.active_node_view() is None and graph_data.get("nodes"):
+                compatible_view_id = self._node_view_id_for_graph_payload(graph_data, file_path=self.current_file_path, fallback_view_id=active_view_id)
+                if compatible_view_id:
+                    self.set_active_node_view(compatible_view_id, announce=False, ignore_lock=True)
+                    metadata = graph_data.setdefault("metadata", {}) if isinstance(graph_data, dict) else {}
+                    if isinstance(metadata, dict):
+                        metadata["active_node_view_id"] = compatible_view_id
+                        metadata["graph_file_extension"] = self.graph_file_extension_for_view_id(compatible_view_id)
             self.undo_stack.clear()
         title = state.get("editor_title")
         if title:
@@ -3596,6 +4851,134 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._refresh_node_view_ui()
         self._initial_fit_pending = True
         QtCore.QTimer.singleShot(0, self._ensure_initial_fit)
+
+    # ------------------------------------------------------------------
+    # Graph bookmarks / navigation
+    # ------------------------------------------------------------------
+    def _bookmark_metadata_from_graph(self, graph_data):
+        metadata = graph_data.get("metadata") if isinstance(graph_data, dict) else {}
+        bookmarks = metadata.get("bookmarks") if isinstance(metadata, dict) else []
+        clean = []
+        for entry in bookmarks or []:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "Bookmark").strip() or "Bookmark"
+            try:
+                rect = entry.get("rect") or {}
+                clean.append({
+                    "id": str(entry.get("id") or uuid.uuid4()),
+                    "name": name,
+                    "rect": {
+                        "x": float(rect.get("x", entry.get("x", 0.0))),
+                        "y": float(rect.get("y", entry.get("y", 0.0))),
+                        "width": max(1.0, float(rect.get("width", entry.get("width", 800.0)))),
+                        "height": max(1.0, float(rect.get("height", entry.get("height", 500.0)))),
+                    },
+                    "view_id": str(entry.get("view_id") or metadata.get("active_node_view_id") or self._active_node_view_id or ""),
+                })
+            except Exception:
+                continue
+        return clean
+
+    def _write_bookmark_metadata_to_graph(self, graph_data):
+        if not isinstance(graph_data, dict):
+            return graph_data
+        metadata = graph_data.setdefault("metadata", {})
+        metadata["bookmarks"] = graph_json_safe(self._graph_bookmarks or [])
+        return graph_data
+
+    def _set_graph_bookmarks_from_payload(self, graph_data):
+        self._graph_bookmarks = self._bookmark_metadata_from_graph(graph_data or {})
+        self._refresh_bookmarks_menu()
+
+    def _selected_or_visible_bookmark_rect(self):
+        items = []
+        if hasattr(self, '_selected_layout_items'):
+            try:
+                items = list(self._selected_layout_items() or [])
+            except Exception:
+                items = []
+        if items:
+            rect = QtCore.QRectF()
+            for item in items:
+                item_rect = item.sceneBoundingRect()
+                rect = item_rect if rect.isNull() else rect.united(item_rect)
+            return rect.adjusted(-80.0, -80.0, 80.0, 80.0)
+        viewport_rect = self.graphView.viewport().rect()
+        return self.graphView.mapToScene(viewport_rect).boundingRect()
+
+    def add_graph_bookmark(self):
+        rect = self._selected_or_visible_bookmark_rect()
+        default_name = "Bookmark %d" % (len(self._graph_bookmarks) + 1)
+        name, ok = QtWidgets.QInputDialog.getText(self, "Add Graph Bookmark", "Bookmark name:", text=default_name)
+        if not ok:
+            return False
+        name = str(name or "").strip()
+        if not name:
+            self._status_message("Bookmark was not added: name is required.", 3500)
+            return False
+        self._graph_bookmarks.append({
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "rect": {
+                "x": float(rect.x()),
+                "y": float(rect.y()),
+                "width": float(max(1.0, rect.width())),
+                "height": float(max(1.0, rect.height())),
+            },
+            "view_id": str(self._active_node_view_id or ""),
+        })
+        self._refresh_bookmarks_menu()
+        self._status_message("Added bookmark: %s" % name, 3500)
+        return True
+
+    def jump_to_graph_bookmark(self, bookmark_id):
+        bookmark = next((b for b in self._graph_bookmarks if b.get("id") == bookmark_id), None)
+        if not bookmark:
+            self._status_message("Bookmark no longer exists.", 3000)
+            return False
+        rect_data = bookmark.get("rect") or {}
+        rect = QtCore.QRectF(
+            float(rect_data.get("x", 0.0)),
+            float(rect_data.get("y", 0.0)),
+            float(max(1.0, rect_data.get("width", 800.0))),
+            float(max(1.0, rect_data.get("height", 500.0))),
+        )
+        self.graphView.fitInView(rect, QtCore.Qt.KeepAspectRatio)
+        self._status_message("Jumped to bookmark: %s" % bookmark.get("name", "Bookmark"), 2500)
+        return True
+
+    def remove_graph_bookmark(self, bookmark_id):
+        before = len(self._graph_bookmarks)
+        self._graph_bookmarks = [b for b in self._graph_bookmarks if b.get("id") != bookmark_id]
+        if len(self._graph_bookmarks) != before:
+            self._refresh_bookmarks_menu()
+            self._status_message("Removed bookmark.", 2500)
+            return True
+        return False
+
+    def _refresh_bookmarks_menu(self):
+        button = getattr(self, '_bookmarksButton', None)
+        if button is None:
+            return
+        menu = QtWidgets.QMenu(button)
+        if not self._graph_bookmarks:
+            empty = menu.addAction("No bookmarks yet")
+            empty.setEnabled(False)
+        else:
+            for bookmark in self._graph_bookmarks:
+                bookmark_id = bookmark.get("id")
+                name = bookmark.get("name") or "Bookmark"
+                action = menu.addAction(name)
+                action.triggered.connect(lambda _checked=False, bid=bookmark_id: self.jump_to_graph_bookmark(bid))
+            menu.addSeparator()
+            remove_menu = menu.addMenu("Remove Bookmark")
+            for bookmark in self._graph_bookmarks:
+                bookmark_id = bookmark.get("id")
+                name = bookmark.get("name") or "Bookmark"
+                action = remove_menu.addAction(name)
+                action.triggered.connect(lambda _checked=False, bid=bookmark_id: self.remove_graph_bookmark(bid))
+        button.setMenu(menu)
 
     def _status_message(self, message, timeout=5000):
         window = self.window()
@@ -3681,14 +5064,135 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             return False
         return True
 
+    # ------------------------------------------------------------------
+    # File integrity / load-save validation
+    # ------------------------------------------------------------------
+    def _view_id_allowed_for_tool(self, view_id):
+        if not view_id:
+            return True
+        if self.graph_allowed_node_view_ids is not None:
+            return view_id in set(self.graph_allowed_node_view_ids or [])
+        prefixes = self.graph_allowed_node_view_prefixes or []
+        if prefixes:
+            return any(str(view_id).startswith(str(prefix)) for prefix in prefixes)
+        return True
+
+    def _canonical_graph_payload_for_hash(self, graph_data):
+        safe = graph_json_safe(graph_data if isinstance(graph_data, dict) else {})
+        metadata = dict(safe.get('metadata') or {})
+        metadata.pop('graph_integrity', None)
+        metadata.pop('graph_sha256', None)
+        safe['metadata'] = metadata
+        return safe
+
+    def _compute_graph_payload_hash(self, graph_data):
+        canonical = self._canonical_graph_payload_for_hash(graph_data)
+        encoded = json.dumps(canonical, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _stamp_graph_integrity_hash(self, graph_data):
+        if not isinstance(graph_data, dict):
+            return graph_data
+        metadata = graph_data.setdefault('metadata', {})
+        metadata['graph_integrity'] = {
+            'algorithm': 'sha256',
+            'sha256': self._compute_graph_payload_hash(graph_data),
+        }
+        return graph_data
+
+    def _verify_graph_integrity_hash(self, graph_data, *, show_feedback=True):
+        if not isinstance(graph_data, dict):
+            return False, 'Graph payload is not an object.'
+        metadata = graph_data.get('metadata') if isinstance(graph_data.get('metadata'), dict) else {}
+        integrity = metadata.get('graph_integrity') if isinstance(metadata, dict) else None
+        if not isinstance(integrity, dict) or not integrity.get('sha256'):
+            # Backward compatibility: older graph files do not have a hash yet.
+            return True, ''
+        expected = str(integrity.get('sha256') or '').strip().lower()
+        actual = self._compute_graph_payload_hash(graph_data).lower()
+        if expected != actual:
+            reason = 'Graph file integrity check failed. The file may have been edited outside Nexus or corrupted.'
+            if show_feedback:
+                QtWidgets.QMessageBox.critical(self, 'Graph Integrity Check Failed', reason)
+            return False, reason
+        return True, ''
+
+    def _graph_extension_matches_view(self, file_path, view_id):
+        if not file_path or not view_id:
+            return True, ''
+        actual_ext = Path(file_path).suffix
+        if not actual_ext or actual_ext.lower() in {'.json', '.nexnode'}:
+            return True, ''
+        expected_ext = self.graph_file_extension_for_view_id(view_id)
+        if expected_ext and not expected_ext.startswith('.'):
+            expected_ext = '.' + expected_ext
+        if expected_ext and actual_ext.lower() != expected_ext.lower():
+            return False, f'File extension {actual_ext} does not match graph type {view_id}; expected {expected_ext}.'
+        return True, ''
+
+    def _validate_graph_payload_for_view_id(self, graph_data, view_id):
+        if not isinstance(graph_data, dict):
+            return ['Graph payload is not an object.']
+        messages = []
+        if view_id and view_id not in NODE_VIEW_REGISTRY:
+            messages.append(f'Unknown graph view id: {view_id}')
+            return messages
+        if view_id and not self._view_id_allowed_for_tool(view_id):
+            messages.append(f'Graph view {view_id} is not valid for {self.graph_tool_label}.')
+            return messages
+        registry = self._registry_for_view_id(view_id) if view_id else self.active_node_registry()
+        disallowed_types = self._disallowed_node_types_in_graph_data(graph_data, registry=registry)
+        if disallowed_types:
+            messages.append('Graph contains node types that are not allowed in this graph type: ' + ', '.join(disallowed_types))
+        view_definition = NODE_VIEW_REGISTRY.get(view_id) if view_id else self.active_node_view()
+        messages.extend(self._validate_graph_against_rules(graph_data=graph_data, view_definition=view_definition))
+        return messages
+
+    def _validate_graph_payload_for_load(self, graph_data, *, file_path='', expected_view_id=None, show_feedback=True):
+        ok, reason = self._verify_graph_integrity_hash(graph_data, show_feedback=show_feedback)
+        if not ok:
+            return False, reason
+        metadata = graph_data.get('metadata') if isinstance(graph_data, dict) else {}
+        actual_view_id = metadata.get('active_node_view_id') if isinstance(metadata, dict) else None
+        view_id = actual_view_id or expected_view_id
+        if expected_view_id and actual_view_id and actual_view_id != expected_view_id:
+            expected_name = getattr(NODE_VIEW_REGISTRY.get(expected_view_id), 'name', expected_view_id)
+            actual_name = getattr(NODE_VIEW_REGISTRY.get(actual_view_id), 'name', actual_view_id)
+            reason = f'This graph must be a {expected_name}; the file is a {actual_name}.'
+            if show_feedback:
+                QtWidgets.QMessageBox.warning(self, 'Invalid Graph Type', reason)
+            return False, reason
+        if view_id is None and isinstance(graph_data, dict) and graph_data.get('nodes'):
+            view_id = self._find_compatible_view_id_for_graph_data(graph_data)
+        ok, reason = self._graph_extension_matches_view(file_path, view_id)
+        if not ok:
+            if show_feedback:
+                QtWidgets.QMessageBox.warning(self, 'Graph Extension Mismatch', reason)
+            return False, reason
+        messages = self._validate_graph_payload_for_view_id(graph_data, view_id)
+        if messages:
+            reason = '\n'.join(messages)
+            if show_feedback:
+                QtWidgets.QMessageBox.warning(self, f'{self.graph_view_label} Validation Failed', reason)
+            return False, reason
+        return True, ''
+
     def _save_graph_to_path(self, file_path):
         graph_data = self._save_payload_for_active_context()
         metadata = graph_data.setdefault("metadata", {})
         metadata["active_node_view_id"] = self._active_node_view_id
         metadata["graph_file_extension"] = self.graph_file_extension_for_view_id(self._active_node_view_id)
+        self._write_bookmark_metadata_to_graph(graph_data)
+
+        validation_messages = self._validate_graph_payload_for_view_id(graph_data, self._active_node_view_id)
+        if validation_messages:
+            QtWidgets.QMessageBox.warning(self, f'{self.graph_view_label} Validation Failed', '\n'.join(validation_messages))
+            return False
 
         if not self._validate_save_path_for_graph(file_path, graph_data):
             return False
+
+        self._stamp_graph_integrity_hash(graph_data)
 
         try:
             with open(file_path, "w", encoding="utf-8") as f:
@@ -3721,11 +5225,15 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             with open(file_path, "r", encoding="utf-8") as f:
                 graph_data = json.load(f)
 
+            ok, reason = self._validate_graph_payload_for_load(graph_data, file_path=file_path, show_feedback=True)
+            if not ok:
+                return False
+
             self._graph_context_stack = []
             self._root_graph_data = None
             self._inline_subgraph_expansions = {}
             metadata = graph_data.get("metadata") if isinstance(graph_data, dict) else None
-            active_view_id = metadata.get("active_node_view_id") if isinstance(metadata, dict) else None
+            active_view_id = self._node_view_id_for_graph_payload(graph_data, file_path=file_path, fallback_view_id=(metadata.get("active_node_view_id") if isinstance(metadata, dict) else None))
             if active_view_id is not None:
                 self.set_active_node_view(active_view_id, announce=False, ignore_lock=True)
             elif not self._graph_has_nodes():
@@ -3750,10 +5258,12 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                         f"{self.graph_view_label} Compatibility",
                         f"This graph contains node types that are not available in the selected {self.graph_view_label}\n\n%s" % "\n".join(disallowed_types),
                     )
+                    return False
 
             self.scene._suspend_undo = True
             try:
                 self.scene.load_graph(self._ensure_graph_control_flow_nodes(graph_data))
+                self._set_graph_bookmarks_from_payload(graph_data)
             finally:
                 self.scene._suspend_undo = False
 

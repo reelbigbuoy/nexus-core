@@ -144,6 +144,24 @@ class ConnectionPinItem(QtWidgets.QGraphicsItem):
             self.update_path()
             self.refresh_style()
 
+    def set_path_highlight_state(self, state='normal'):
+        state = str(state or 'normal')
+        if self.path_highlight_state != state:
+            self.path_highlight_state = state
+            self.refresh_style()
+
+    def set_validation_feedback(self, state=None, messages=None):
+        normalized = str(state or '').strip().lower() or None
+        if normalized not in (None, 'error', 'warning'):
+            normalized = None
+        self.validation_state = normalized
+        self.validation_messages = [str(m) for m in (messages or []) if str(m or '').strip()]
+        if self.validation_messages:
+            self.setToolTip('\n'.join(self.validation_messages))
+        else:
+            self.setToolTip('')
+        self.refresh_style()
+
     def refresh_style(self):
         self.update()
 
@@ -172,6 +190,9 @@ class ConnectionPinItem(QtWidgets.QGraphicsItem):
         painter.drawEllipse(QtCore.QPointF(0.0, 0.0), self.base_radius, self.base_radius)
 
     def hoverEnterEvent(self, event):
+        if getattr(self, 'is_projection', False):
+            event.ignore()
+            return
         self._hovered = True
         self.setCursor(QtCore.Qt.OpenHandCursor)
         self.refresh_style()
@@ -179,6 +200,9 @@ class ConnectionPinItem(QtWidgets.QGraphicsItem):
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
+        if getattr(self, 'is_projection', False):
+            event.ignore()
+            return
         self._hovered = False
         self.refresh_style()
         self.connection_item.sync_pin_items()
@@ -230,10 +254,12 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
     ENDPOINT_SOURCE = "source"
     ENDPOINT_TARGET = "target"
 
-    def __init__(self, source_port=None, target_port=None, temp_end_pos=None, route_points=None, preview_mode=False, connection_kind=None):
+    def __init__(self, source_port=None, target_port=None, temp_end_pos=None, route_points=None, preview_mode=False, connection_kind=None, register_with_ports=True, projection_mode=False):
         super().__init__()
         self.source_port = source_port
         self.target_port = target_port
+        self.register_with_ports = bool(register_with_ports)
+        self.is_projection = bool(projection_mode)
         self.temp_end_pos = QtCore.QPointF(temp_end_pos) if temp_end_pos is not None else QtCore.QPointF()
         self.route_points = [QtCore.QPointF(p) for p in (route_points or [])]
         self.preview_mode = preview_mode
@@ -244,15 +270,19 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         self._active_edit = False
         self._cached_connection_kind = (str(connection_kind).strip().lower() if connection_kind else None)
         self.execution_state = 'normal'
+        self.path_highlight_state = 'normal'
+        self.validation_state = None
+        self.validation_messages = []
 
 
-        self.setZValue(-1)
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
-        self.setAcceptHoverEvents(True)
+        self.setZValue(-2 if self.is_projection else -1)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, not self.is_projection)
+        self.setAcceptHoverEvents(not self.is_projection)
+        self.setAcceptedMouseButtons(QtCore.Qt.NoButton if self.is_projection else QtCore.Qt.LeftButton)
 
-        if self.source_port:
+        if self.register_with_ports and self.source_port:
             self.source_port.add_connection(self)
-        if self.target_port:
+        if self.register_with_ports and self.target_port:
             self.target_port.add_connection(self)
 
         self.refresh_style()
@@ -292,6 +322,24 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
             self.update_path()
             self.refresh_style()
 
+    def set_path_highlight_state(self, state='normal'):
+        state = str(state or 'normal')
+        if self.path_highlight_state != state:
+            self.path_highlight_state = state
+            self.refresh_style()
+
+    def set_validation_feedback(self, state=None, messages=None):
+        normalized = str(state or '').strip().lower() or None
+        if normalized not in (None, 'error', 'warning'):
+            normalized = None
+        self.validation_state = normalized
+        self.validation_messages = [str(m) for m in (messages or []) if str(m or '').strip()]
+        if self.validation_messages:
+            self.setToolTip('\n'.join(self.validation_messages))
+        else:
+            self.setToolTip('')
+        self.refresh_style()
+
     def refresh_style(self):
         scene = self.scene()
         theme = scene.theme if scene and hasattr(scene, "theme") else THEMES["Midnight"]
@@ -307,6 +355,13 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         color = QtGui.QColor(theme.get(color_role, theme.get('connection')))
         width = getattr(style, 'width', None) or default_width
         pen_style = _pen_style_from_name(getattr(style, 'pen_style', None)) if style is not None else default_pen_style
+        if getattr(self, 'is_projection', False):
+            # Projection wires are visual-only continuity bridges for expanded
+            # subgraphs. Keep the normal connection color/kind, but make them
+            # non-interactive and slightly lighter than real model wires.
+            color.setAlpha(190)
+            width = max(width, 2.8)
+            pen_style = QtCore.Qt.SolidLine
         if self.preview_mode:
             color = QtGui.QColor(88, 214, 141) if self.preview_valid else QtGui.QColor(231, 76, 60)
             width = max(width, 2.8)
@@ -321,6 +376,26 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
             color = QtGui.QColor(theme.get("wire_selected", theme.get("node_selected", theme.get("accent", theme["connection"]))))
             color.setAlpha(230)
             width = 3.0
+        if self.path_highlight_state == 'path_exec':
+            color = QtGui.QColor(255, 176, 46)
+            width = max(width, 4.4)
+            pen_style = QtCore.Qt.SolidLine
+        elif self.path_highlight_state == 'path_data':
+            color = QtGui.QColor(64, 196, 255)
+            width = max(width, 3.7)
+            pen_style = QtCore.Qt.SolidLine
+        elif self.path_highlight_state == 'path_origin':
+            color = QtGui.QColor(161, 116, 255)
+            width = max(width, 4.2)
+            pen_style = QtCore.Qt.SolidLine
+        if self.validation_state == 'error':
+            color = QtGui.QColor(231, 76, 60)
+            width = max(width, 4.8)
+            pen_style = QtCore.Qt.SolidLine
+        elif self.validation_state == 'warning':
+            color = QtGui.QColor(241, 196, 15)
+            width = max(width, 4.0)
+            pen_style = QtCore.Qt.SolidLine
         if self.execution_state == 'active':
             color = QtGui.QColor(88, 214, 141)
             width = max(width, 4.2)
@@ -331,6 +406,13 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         self.update()
 
     def itemChange(self, change, value):
+        if getattr(self, 'is_projection', False) and change == QtWidgets.QGraphicsItem.ItemSelectedHasChanged:
+            try:
+                if bool(value):
+                    self.setSelected(False)
+            except Exception:
+                pass
+            return super().itemChange(change, value)
         if change == QtWidgets.QGraphicsItem.ItemSelectedHasChanged:
             self.refresh_style()
             self.sync_pin_items()
@@ -372,7 +454,7 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
                 self.sync_pin_items()
 
     def pins_should_be_visible(self):
-        return not self.preview_mode
+        return not self.preview_mode and not getattr(self, 'is_projection', False)
 
     def sync_pin_items(self):
         scene = self.scene()
@@ -469,17 +551,35 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         self.update_path()
 
     def hoverEnterEvent(self, event):
+        if getattr(self, 'is_projection', False):
+            event.ignore()
+            return
         self._hovered = True
         self.refresh_style()
         self.sync_pin_items()
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
+        if getattr(self, 'is_projection', False):
+            event.ignore()
+            return
         self._hovered = False
         self.refresh_style()
         self.sync_pin_items()
         super().hoverLeaveEvent(event)
 
+
+    def mousePressEvent(self, event):
+        if getattr(self, 'is_projection', False):
+            event.ignore()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if getattr(self, 'is_projection', False):
+            event.ignore()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def shape(self):
         stroker = QtGui.QPainterPathStroker()
@@ -494,7 +594,7 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         clean_option.state &= ~QtWidgets.QStyle.State_Selected
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
 
-        if self.isSelected() or self._hovered or self._active_edit or self.preview_mode:
+        if (not getattr(self, 'is_projection', False)) and (self.isSelected() or self._hovered or self._active_edit or self.preview_mode or self.path_highlight_state != 'normal'):
             scene = self.scene()
             theme = scene.theme if scene and hasattr(scene, "theme") else THEMES["Midnight"]
             base_color = QtGui.QColor(theme.get("wire_selected", theme.get("node_selected", theme.get("accent", theme["connection"]))))
@@ -509,7 +609,7 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
             painter.restore()
 
         super().paint(painter, clean_option, widget)
-        if not self.preview_mode:
+        if not self.preview_mode and not getattr(self, 'is_projection', False):
             handle_pen = QtGui.QPen(QtGui.QColor(32, 32, 32), 1.0)
             handle_brush = QtGui.QBrush(QtGui.QColor(200, 200, 200) if self.isSelected() else QtGui.QColor(120, 120, 120))
             painter.setPen(handle_pen)
@@ -532,7 +632,14 @@ class InlineSubgraphBoundaryItem(QtWidgets.QGraphicsItem):
         self._rect = QtCore.QRectF(rect)
         self.setZValue(1000)
         self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, False)
+        self.setFlags(
+            QtWidgets.QGraphicsItem.ItemIsSelectable |
+            QtWidgets.QGraphicsItem.ItemSendsGeometryChanges
+        )
+        self._drag_press_scene_pos = None
+        self._drag_start_container_pos = None
+        self._drag_group_start_state = None
+        self._drag_started = False
 
     def boundingRect(self):
         return self._rect.adjusted(-6, -6, 6, 6)
@@ -554,7 +661,8 @@ class InlineSubgraphBoundaryItem(QtWidgets.QGraphicsItem):
         text_color = QtGui.QColor(theme.get('text', '#ffffff'))
         fill.setAlpha(28)
 
-        painter.setPen(QtGui.QPen(border, 2.0, QtCore.Qt.DashLine))
+        border_width = 3.0 if self.isSelected() else 2.0
+        painter.setPen(QtGui.QPen(border, border_width, QtCore.Qt.DashLine))
         painter.setBrush(QtGui.QBrush(fill))
         painter.drawRoundedRect(self._rect, 12, 12)
 
@@ -564,7 +672,7 @@ class InlineSubgraphBoundaryItem(QtWidgets.QGraphicsItem):
         painter.drawRoundedRect(title_rect, 12, 12)
         painter.drawRect(QtCore.QRectF(title_rect.left(), title_rect.bottom() - 12.0, title_rect.width(), 12.0))
 
-        painter.setPen(QtGui.QPen(border, 2.0, QtCore.Qt.DashLine))
+        painter.setPen(QtGui.QPen(border, border_width, QtCore.Qt.DashLine))
         painter.setBrush(QtCore.Qt.NoBrush)
         painter.drawRoundedRect(self._rect, 12, 12)
 
@@ -604,12 +712,74 @@ class InlineSubgraphBoundaryItem(QtWidgets.QGraphicsItem):
             # behavior and avoiding dependence on double-click fallback.
             event.accept()
             return
+        if event.button() == QtCore.Qt.LeftButton:
+            scene = self.scene()
+            if scene is not None and not self.isSelected() and not (event.modifiers() & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)):
+                scene.clearSelection()
+                self.setSelected(True)
+            elif scene is not None and not self.isSelected():
+                self.setSelected(True)
+            self._drag_press_scene_pos = QtCore.QPointF(event.scenePos())
+            self._drag_start_container_pos = self._container_scene_pos()
+            if self.editor is not None and hasattr(self.editor, '_capture_inline_expansion_group_state'):
+                self._drag_group_start_state = self.editor._capture_inline_expansion_group_state(self.container_node_id)
+            else:
+                self._drag_group_start_state = None
+            self._drag_started = False
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (event.buttons() & QtCore.Qt.LeftButton) and self._drag_press_scene_pos is not None:
+            if self._event_in_collapse_button(event):
+                event.accept()
+                return
+            if not self._drag_started:
+                distance = QtCore.QLineF(self._drag_press_scene_pos, QtCore.QPointF(event.scenePos())).length()
+                if distance < QtWidgets.QApplication.startDragDistance():
+                    event.accept()
+                    return
+                self._drag_started = True
+            if self.editor is not None and self._drag_start_container_pos is not None:
+                delta = QtCore.QPointF(event.scenePos() - self._drag_press_scene_pos)
+                if self._drag_group_start_state is not None and hasattr(self.editor, '_apply_inline_expansion_group_drag_state'):
+                    self.editor._apply_inline_expansion_group_drag_state(self.container_node_id, self._drag_group_start_state, delta)
+                elif hasattr(self.editor, '_apply_inline_expansion_group_move'):
+                    self.editor._apply_inline_expansion_group_move(self.container_node_id, self._drag_start_container_pos + delta)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if self._collapse_from_button_event(event):
             return
+        if event.button() == QtCore.Qt.LeftButton and self._drag_press_scene_pos is not None:
+            old_pos = QtCore.QPointF(self._drag_start_container_pos) if self._drag_start_container_pos is not None else None
+            new_pos = self._container_scene_pos()
+            was_dragging = self._drag_started
+            self._drag_press_scene_pos = None
+            self._drag_start_container_pos = None
+            self._drag_group_start_state = None
+            self._drag_started = False
+            if was_dragging and old_pos is not None and new_pos is not None and old_pos != new_pos:
+                if self.editor is not None and hasattr(self.editor, 'handle_inline_boundary_moved'):
+                    self.editor.handle_inline_boundary_moved(self.container_node_id, old_pos, new_pos)
+                event.accept()
+                return
         super().mouseReleaseEvent(event)
+
+    def _container_scene_pos(self):
+        if self.editor is None:
+            return QtCore.QPointF()
+        expansion = (getattr(self.editor, '_inline_subgraph_expansions', {}) or {}).get(self.container_node_id)
+        container = expansion.get('container_node') if expansion else None
+        if container is not None:
+            try:
+                return QtCore.QPointF(container.pos())
+            except RuntimeError:
+                pass
+        return QtCore.QPointF(self.pos())
 
     def mouseDoubleClickEvent(self, event):
         if self._collapse_from_button_event(event):
@@ -648,6 +818,9 @@ class NodeItem(QtWidgets.QGraphicsItem):
         self._interactive_drag_active = False
         self.execution_state = 'normal'
         self.execution_note = ''
+        self.path_highlight_state = 'normal'
+        self.validation_state = None
+        self.validation_messages = []
         self.breakpoint_enabled = bool((self.node_data.properties or {}).get('__runtime_breakpoint', False))
 
         for i, name in enumerate(self.input_names):
@@ -703,19 +876,26 @@ class NodeItem(QtWidgets.QGraphicsItem):
                 return port_def
         for spec in self._dynamic_port_specs():
             if spec.get('direction') == direction and spec.get('name') == name:
-                return self._make_dynamic_definition_port(name, direction, spec.get('data_type', 'any'), spec.get('connection_kind', 'data'))
+                return self._make_dynamic_definition_port(
+                    name,
+                    direction,
+                    spec.get('data_type', 'any'),
+                    spec.get('connection_kind', 'data'),
+                    port_id=spec.get('id'),
+                    multi_connection=bool(spec.get('multi_connection', direction == 'output')),
+                )
         return self._make_dynamic_definition_port(name, direction, 'any', 'data')
 
-    def _make_dynamic_definition_port(self, name, direction, data_type='any', connection_kind='data'):
+    def _make_dynamic_definition_port(self, name, direction, data_type='any', connection_kind='data', port_id=None, multi_connection=None):
         try:
             from .definitions import NodePortDefinition
             return NodePortDefinition(
-                id=str(name).strip().lower().replace(' ', '_') or 'port',
+                id=str(port_id or '').strip() or str(name).strip().lower().replace(' ', '_') or 'port',
                 name=str(name),
                 direction=direction,
                 data_type=data_type,
                 connection_kind=connection_kind,
-                multi_connection=True if direction == 'output' else False,
+                multi_connection=(True if direction == 'output' else False) if multi_connection is None else bool(multi_connection),
             )
         except Exception:
             return None
@@ -793,6 +973,26 @@ class NodeItem(QtWidgets.QGraphicsItem):
             self.setToolTip(self.execution_note)
             self.update()
 
+    def set_path_highlight_state(self, state='normal'):
+        state = str(state or 'normal')
+        if self.path_highlight_state != state:
+            self.path_highlight_state = state
+            self.update()
+
+    def set_validation_feedback(self, state=None, messages=None):
+        normalized = str(state or '').strip().lower() or None
+        if normalized not in (None, 'error', 'warning'):
+            normalized = None
+        self.validation_state = normalized
+        self.validation_messages = [str(m) for m in (messages or []) if str(m or '').strip()]
+        tooltip_parts = []
+        if self.validation_messages:
+            tooltip_parts.extend(self.validation_messages)
+        if getattr(self, 'execution_note', ''):
+            tooltip_parts.append(str(self.execution_note))
+        self.setToolTip('\n'.join(tooltip_parts))
+        self.update()
+
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
 
@@ -803,6 +1003,28 @@ class NodeItem(QtWidgets.QGraphicsItem):
         title_color = QtGui.QColor(theme["node_title"])
         border_color = QtGui.QColor(theme["node_selected"] if self.isSelected() else theme["node_border"])
         text_color = QtGui.QColor(theme["text"])
+
+        if self.path_highlight_state == 'path_origin':
+            border_color = QtGui.QColor(161, 116, 255)
+            body_color = body_color.lighter(114)
+            title_color = title_color.lighter(126)
+        elif self.path_highlight_state == 'path_exec':
+            border_color = QtGui.QColor(255, 176, 46)
+            body_color = body_color.lighter(110)
+            title_color = title_color.lighter(120)
+        elif self.path_highlight_state == 'path_data':
+            border_color = QtGui.QColor(64, 196, 255)
+            body_color = body_color.lighter(108)
+            title_color = title_color.lighter(116)
+
+        if self.validation_state == 'error':
+            border_color = QtGui.QColor(231, 76, 60)
+            body_color = body_color.lighter(112)
+            title_color = title_color.lighter(125)
+        elif self.validation_state == 'warning':
+            border_color = QtGui.QColor(241, 196, 15)
+            body_color = body_color.lighter(108)
+            title_color = title_color.lighter(118)
 
         if self.execution_state == 'current':
             border_color = QtGui.QColor(88, 214, 141)
@@ -1005,9 +1227,38 @@ class NodeItem(QtWidgets.QGraphicsItem):
             self.node_data.x = self.pos().x()
             self.node_data.y = self.pos().y()
             scene = self.scene()
+
+            # Real model connections are registered on their source/target ports,
+            # so they update naturally when the node moves. Inline-expanded
+            # subgraph bridge wires are projection-only and intentionally do not
+            # register with ports; without this pass, a parent node moved while a
+            # subgraph is expanded can leave those visual bridge wires pointing at
+            # stale endpoint locations until collapse/re-expand. Keep this visual
+            # and local: do not rebuild, reroute, restyle, or persist anything.
+            touched = set()
             for port in self.inputs + self.outputs:
                 for conn in list(port.connections):
-                    conn.update_path()
+                    try:
+                        conn.update_path()
+                        touched.add(conn)
+                    except RuntimeError:
+                        pass
+
+            if scene is not None:
+                try:
+                    for item in scene.items():
+                        if not isinstance(item, ConnectionItem):
+                            continue
+                        if item in touched or not getattr(item, 'is_projection', False):
+                            continue
+                        source_node = getattr(getattr(item, 'source_port', None), 'parent_node', None)
+                        target_node = getattr(getattr(item, 'target_port', None), 'parent_node', None)
+                        if source_node is self or target_node is self:
+                            item.update_path()
+                            item.sync_pin_items()
+                except RuntimeError:
+                    pass
+
             if scene is not None and hasattr(scene, "ensure_logical_scene_rect"):
                 scene.ensure_logical_scene_rect(self.sceneBoundingRect())
 

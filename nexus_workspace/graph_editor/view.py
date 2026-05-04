@@ -13,18 +13,22 @@ from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from .constants import ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, FIT_PADDING
 from .definitions import NODE_REGISTRY, NodeDefinitionRegistry
 from .graphics_items import NodeItem, ConnectionItem, PortItem, ConnectionPinItem, InlineSubgraphBoundaryItem, _distance_to_segment
-from .commands import AddNodeCommand
+from .commands import AddNodeCommand, AddConnectionCommand
+from .authoring import PaletteUsageStore
 from .geometry import qpoint, qrect, px
 
 
 class NodePalettePopup(QtWidgets.QDialog):
-    def __init__(self, parent=None, registry=None, title="All Actions for this Graph"):
+    def __init__(self, parent=None, registry=None, title="All Actions for this Graph", filter_fn=None, template_service=None):
         super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
         self.setObjectName('NoDENodePalettePopup')
         self.setMinimumSize(360, 460)
         self._chosen_definition = None
         self._registry = registry or NODE_REGISTRY
+        self._filter_fn = filter_fn
+        self._template_service = template_service
+        self._chosen_template_id = None
         if not isinstance(self._registry, NodeDefinitionRegistry):
             raise TypeError("NodePalettePopup requires a NodeDefinitionRegistry")
 
@@ -53,7 +57,14 @@ class NodePalettePopup(QtWidgets.QDialog):
         self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.itemDoubleClicked.connect(self._on_item_activated)
         self.tree.itemActivated.connect(self._on_item_activated)
+        self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         layout.addWidget(self.tree, 1)
+
+        self.hint_label = QtWidgets.QLabel("Right-click a node type to favorite it. Press Enter to insert.", self)
+        self.hint_label.setObjectName("hintLabel")
+        self.hint_label.setWordWrap(True)
+        layout.addWidget(self.hint_label)
 
         self.setStyleSheet("""
         QDialog#NoDENodePalettePopup {
@@ -65,6 +76,11 @@ class NodePalettePopup(QtWidgets.QDialog):
             color: #d8d8d8;
             font-size: 14px;
             padding: 2px 2px 0 2px;
+        }
+        QLabel#hintLabel {
+            color: #a8a8a8;
+            font-size: 11px;
+            padding: 0 2px 2px 2px;
         }
         QLineEdit {
             background: #0f0f0f;
@@ -128,26 +144,69 @@ class NodePalettePopup(QtWidgets.QDialog):
     def chosen_definition(self):
         return self._chosen_definition
 
+    def chosen_template_id(self):
+        return self._chosen_template_id
+
     def _search_text(self):
         return self.search_edit.text().strip()
 
+    def _visible_definition(self, definition):
+        metadata = getattr(definition, 'metadata', {}) or {}
+        return not bool(metadata.get('hide_from_palette') or metadata.get('required_graph_node'))
+
+    def _definition_by_type_id(self, type_id):
+        return self._registry.get(type_id) if self._registry is not None else None
+
+    def _passes_filter(self, definition):
+        if self._filter_fn is None:
+            return True
+        try:
+            return bool(self._filter_fn(definition))
+        except Exception:
+            return False
+
     def _definitions_by_category(self):
         query = self._search_text()
-        def visible(definition):
-            metadata = getattr(definition, 'metadata', {}) or {}
-            return not bool(metadata.get('hide_from_palette') or metadata.get('required_graph_node'))
+        definitions = [definition for definition in self._registry.search(query) if self._visible_definition(definition) and self._passes_filter(definition)]
+        grouped = {}
 
         if not query:
-            grouped = {}
-            for definition in self._registry.all_definitions():
-                if visible(definition):
-                    grouped.setdefault(definition.category, []).append(definition)
-            return grouped
+            favorites = []
+            for type_id in PaletteUsageStore.favorites():
+                definition = self._definition_by_type_id(type_id)
+                if definition is not None and self._visible_definition(definition) and self._passes_filter(definition):
+                    favorites.append(definition)
+            if favorites:
+                grouped["★ Favorites"] = favorites
 
-        grouped = {}
-        for definition in self._registry.search(query):
-            if visible(definition):
-                grouped.setdefault(definition.category, []).append(definition)
+            recents = []
+            favorite_ids = {definition.type_id for definition in favorites}
+            for type_id in PaletteUsageStore.recents():
+                definition = self._definition_by_type_id(type_id)
+                if definition is not None and self._visible_definition(definition) and self._passes_filter(definition) and definition.type_id not in favorite_ids:
+                    recents.append(definition)
+            if recents:
+                grouped["Recent"] = recents
+
+        for definition in definitions:
+            grouped.setdefault(definition.category, []).append(definition)
+
+        # User graph templates are shared-framework artifacts.  They appear in
+        # the same searchable authoring popup, but remain distinct from node
+        # definitions so plugins can filter node types without owning template
+        # storage or insertion behavior.
+        if self._template_service is not None:
+            try:
+                template_query = query.lower()
+                templates = []
+                for summary in self._template_service.list_templates():
+                    haystack = " ".join([summary.name, summary.description, summary.category]).lower()
+                    if not template_query or template_query in haystack:
+                        templates.append(summary)
+                if templates:
+                    grouped.setdefault("Templates", []).extend(templates)
+            except Exception:
+                pass
         return grouped
 
     def _rebuild_tree(self):
@@ -160,10 +219,17 @@ class NodePalettePopup(QtWidgets.QDialog):
             cat_item.setFlags(QtCore.Qt.ItemIsEnabled)
             self.tree.addTopLevelItem(cat_item)
             for definition in definitions:
-                leaf = QtWidgets.QTreeWidgetItem([definition.display_name])
-                leaf.setData(0, QtCore.Qt.UserRole, definition)
-                if definition.description:
-                    leaf.setToolTip(0, definition.description)
+                if hasattr(definition, 'template_id'):
+                    leaf = QtWidgets.QTreeWidgetItem(["▣ " + definition.name])
+                    leaf.setData(0, QtCore.Qt.UserRole, {'kind': 'template', 'id': definition.template_id})
+                    if definition.description:
+                        leaf.setToolTip(0, definition.description)
+                else:
+                    prefix = "★ " if definition.type_id in PaletteUsageStore.favorites() else ""
+                    leaf = QtWidgets.QTreeWidgetItem([prefix + definition.display_name])
+                    leaf.setData(0, QtCore.Qt.UserRole, definition)
+                    if definition.description:
+                        leaf.setToolTip(0, definition.description)
                 cat_item.addChild(leaf)
                 if first_leaf is None:
                     first_leaf = leaf
@@ -189,8 +255,31 @@ class NodePalettePopup(QtWidgets.QDialog):
             item.setExpanded(not item.isExpanded())
             self.tree.setCurrentItem(item)
             return
+        if isinstance(definition, dict) and definition.get('kind') == 'template':
+            self._chosen_template_id = definition.get('id')
+            self._chosen_definition = None
+            self.accept()
+            return
         self._chosen_definition = definition
+        self._chosen_template_id = None
+        PaletteUsageStore.record_recent(definition.type_id)
         self.accept()
+
+
+    def _show_tree_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        definition = item.data(0, QtCore.Qt.UserRole)
+        if definition is None or isinstance(definition, dict):
+            return
+        menu = QtWidgets.QMenu(self)
+        is_favorite = definition.type_id in PaletteUsageStore.favorites()
+        favorite_action = menu.addAction("Remove Favorite" if is_favorite else "Add to Favorites")
+        chosen = menu.exec_(self.tree.viewport().mapToGlobal(pos))
+        if chosen is favorite_action:
+            PaletteUsageStore.toggle_favorite(definition.type_id)
+            self._rebuild_tree()
 
     def keyPressEvent(self, event):
         if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
@@ -259,6 +348,8 @@ class GraphView(QtWidgets.QGraphicsView):
         self._right_press_pos = QtCore.QPoint()
         self._right_press_global = QtCore.QPoint()
         self._right_pan_threshold = 6
+        self._suppress_next_context_menu = False
+
 
         self._selection_band = QtWidgets.QRubberBand(QtWidgets.QRubberBand.Rectangle, self.viewport())
         self._selection_origin = None
@@ -351,8 +442,14 @@ class GraphView(QtWidgets.QGraphicsView):
         if scene is None:
             return
 
-        selected = scene.selectedItems()
-        if selected:
+        selected = [
+            item for item in scene.selectedItems()
+            if isinstance(item, (NodeItem, ConnectionItem, InlineSubgraphBoundaryItem)) and item.isVisible()
+        ]
+        # UX rule: a single selected item usually means the user wants to get
+        # re-oriented, not zoom into that one node. Multiple selections frame
+        # the selected working set.
+        if len(selected) > 1:
             self.frame_items(selected)
             return
 
@@ -380,15 +477,15 @@ class GraphView(QtWidgets.QGraphicsView):
 
     def _spawn_node_definition(self, definition, scene_pos):
         if definition is None:
-            return
+            return None
         scene = self.scene()
         if scene is None:
-            return
+            return None
         was_empty_graph = not any(isinstance(item, NodeItem) for item in scene.items())
         editor = getattr(self, "editor", None)
         if editor is not None and hasattr(editor, '_can_add_node_type'):
             if not editor._can_add_node_type(definition.type_id, show_feedback=True):
-                return
+                return None
         created_node_id = None
         undo_stack = getattr(editor, "undo_stack", None)
         if undo_stack is not None:
@@ -408,8 +505,10 @@ class GraphView(QtWidgets.QGraphicsView):
             )
             created_node_id = getattr(getattr(node, "node_data", None), "node_id", None)
 
+        node_item = scene.find_node_by_id(created_node_id) if created_node_id and hasattr(scene, 'find_node_by_id') else None
         if was_empty_graph:
             self._frame_first_node_after_spawn(created_node_id)
+        return node_item
 
     def _frame_first_node_after_spawn(self, node_id):
         """Zoom to a newly placed first node instead of leaving empty-graph zoom."""
@@ -426,17 +525,181 @@ class GraphView(QtWidgets.QGraphicsView):
 
         QtCore.QTimer.singleShot(0, _frame)
 
-    def _show_graph_node_palette(self, local_pos, global_pos):
+    def _show_graph_node_palette(self, local_pos, global_pos, title="All Actions for this Graph", filter_fn=None, connect_from_port=None):
         scene_pos = self.mapToScene(local_pos)
-        popup = NodePalettePopup(self, registry=self.node_registry(), title="All Actions for this Graph")
+        editor = getattr(self, "editor", None)
+        popup = NodePalettePopup(self, registry=self.node_registry(), title=title, filter_fn=filter_fn, template_service=getattr(editor, 'template_service', None))
         popup.show_at(global_pos)
-        if popup.exec_() == QtWidgets.QDialog.Accepted:
-            self._spawn_node_definition(popup.chosen_definition(), scene_pos)
+        accepted = popup.exec_() == QtWidgets.QDialog.Accepted
+        if accepted:
+            # The palette is often opened from a right-button release.  When the
+            # user chooses a node, Qt can deliver a follow-on context event from
+            # the same pointer gesture.  Suppress that one re-entrant context
+            # event so node insertion is a single, clean action.
+            self._suppress_next_context_menu = True
+            QtCore.QTimer.singleShot(250, lambda: setattr(self, '_suppress_next_context_menu', False))
+            template_id = popup.chosen_template_id()
+            if template_id and editor is not None and hasattr(editor, 'insert_template'):
+                editor.insert_template(template_id, scene_pos)
+                return
+            node_item = self._spawn_node_definition(popup.chosen_definition(), scene_pos)
+            if connect_from_port is not None and node_item is not None:
+                self._connect_drag_source_to_new_node(connect_from_port, node_item)
+
+    def _definition_has_compatible_port(self, source_port, definition):
+        if source_port is None or definition is None:
+            return False
+        scene = self.scene()
+        if scene is None:
+            return False
+        editor = getattr(self, "editor", None)
+        if editor is not None and hasattr(editor, '_can_add_node_type'):
+            try:
+                if not editor._can_add_node_type(definition.type_id, show_feedback=False):
+                    return False
+            except TypeError:
+                if not editor._can_add_node_type(definition.type_id):
+                    return False
+            except Exception:
+                return False
+
+        source_is_output = source_port.port_type == PortItem.OUTPUT
+        candidate_defs = definition.inputs if source_is_output else definition.outputs
+        for port_def in candidate_defs:
+            if self._definition_port_compatible_with_source(source_port, port_def):
+                return True
+        return False
+
+    def _definition_port_compatible_with_source(self, source_port, candidate_port_def):
+        source_def = getattr(source_port, 'definition_port', None)
+
+        def _kind(port_def):
+            if port_def is None:
+                return 'data'
+            resolver = getattr(port_def, 'resolved_connection_kind', None)
+            if callable(resolver):
+                try:
+                    return str(resolver() or 'data').strip().lower() or 'data'
+                except Exception:
+                    pass
+            explicit = getattr(port_def, 'connection_kind', None)
+            if explicit:
+                return str(explicit).strip().lower() or 'data'
+            return 'exec' if str(getattr(port_def, 'data_type', '')).strip().lower() == 'exec' else 'data'
+
+        def _dtype(port_def):
+            token = str(getattr(port_def, 'data_type', 'any') or 'any').strip().lower()
+            aliases = {'string': 'str', 'boolean': 'bool', 'integer': 'int', 'double': 'float', 'object': 'complex'}
+            return aliases.get(token, token)
+
+        if _kind(source_def) != _kind(candidate_port_def):
+            return False
+        if _kind(source_def) != 'data':
+            return True
+        source_type = _dtype(source_def)
+        target_type = _dtype(candidate_port_def)
+        return source_type in ('', 'any', '*') or target_type in ('', 'any', '*') or source_type == target_type
+
+    def _connect_drag_source_to_new_node(self, source_port, node_item):
+        scene = self.scene()
+        if scene is None or source_port is None or node_item is None:
+            return False
+        candidate_ports = node_item.inputs if source_port.port_type == PortItem.OUTPUT else node_item.outputs
+        for candidate in candidate_ports:
+            normalized_source, normalized_target = scene._normalized_connection_ports(source_port, candidate)
+            if normalized_source is None or normalized_target is None:
+                continue
+            if not scene._editor_allows_connection(normalized_source, normalized_target):
+                continue
+            connection_kind = None
+            editor = getattr(self, "editor", None)
+            if editor is not None and hasattr(editor, "_connection_kind_for_ports"):
+                try:
+                    connection_kind = editor._connection_kind_for_ports(normalized_source, normalized_target)
+                except Exception:
+                    connection_kind = None
+            connection_data = {
+                "source_node_id": normalized_source.parent_node.node_data.node_id,
+                "source_port": normalized_source.name,
+                "target_node_id": normalized_target.parent_node.node_data.node_id,
+                "target_port": normalized_target.name,
+                "route_points": [],
+                "connection_kind": connection_kind,
+            }
+            editor = getattr(self, "editor", None)
+            undo_stack = getattr(editor, "undo_stack", None)
+            if undo_stack is not None:
+                undo_stack.push(AddConnectionCommand(scene, connection_data))
+            else:
+                scene.add_connection_from_dict(connection_data)
+            return True
+        return False
+
+
+    def _selected_layout_item_count(self):
+        editor = getattr(self, "editor", None)
+        if editor is None or not hasattr(editor, '_selected_layout_items'):
+            return 0
+        try:
+            return len(editor._selected_layout_items())
+        except Exception:
+            return 0
+
+    def _add_layout_actions_to_menu(self, menu):
+        editor = getattr(self, "editor", None)
+        layout_menu = menu.addMenu("Layout")
+        enabled_align = self._selected_layout_item_count() >= 2
+        enabled_dist = self._selected_layout_item_count() >= 3
+        actions = []
+        for label, method, arg, enabled in [
+            ("Align Left", 'align_selected_nodes', 'left', enabled_align),
+            ("Align Center X", 'align_selected_nodes', 'center', enabled_align),
+            ("Align Right", 'align_selected_nodes', 'right', enabled_align),
+            ("Align Top", 'align_selected_nodes', 'top', enabled_align),
+            ("Align Middle Y", 'align_selected_nodes', 'middle', enabled_align),
+            ("Align Bottom", 'align_selected_nodes', 'bottom', enabled_align),
+        ]:
+            act = layout_menu.addAction(label)
+            act.setEnabled(bool(editor is not None and hasattr(editor, method) and enabled))
+            actions.append((act, method, arg))
+        layout_menu.addSeparator()
+        for label, method, arg, enabled in [
+            ("Distribute Horizontally", 'distribute_selected_nodes', 'horizontal', enabled_dist),
+            ("Distribute Vertically", 'distribute_selected_nodes', 'vertical', enabled_dist),
+        ]:
+            act = layout_menu.addAction(label)
+            act.setEnabled(bool(editor is not None and hasattr(editor, method) and enabled))
+            actions.append((act, method, arg))
+        return actions
+
+    def _dispatch_layout_action(self, chosen, layout_actions):
+        if chosen is None:
+            return False
+        editor = getattr(self, "editor", None)
+        if editor is None:
+            return False
+        for act, method, arg in layout_actions:
+            if chosen is act and hasattr(editor, method):
+                getattr(editor, method)(arg)
+                return True
+        return False
+
+    def _show_canvas_context_menu(self, local_pos, global_pos):
+        """Show searchable insertion palette for empty graph space.
+
+        Blank-canvas right-click is graph authoring, regardless of current
+        selection.  Node-specific menus are only shown when the actual click
+        lands on a node item.
+        """
+        self._show_graph_node_palette(local_pos, global_pos)
 
     def _show_node_context_menu(self, node_item, global_pos):
         editor = getattr(self, "editor", None)
         menu = QtWidgets.QMenu(self)
         menu.setToolTipsVisible(True)
+        layout_actions = self._add_layout_actions_to_menu(menu) if self._selected_layout_item_count() >= 2 else []
+        if layout_actions:
+            menu.addSeparator()
 
         is_subgraph = bool(editor is not None and hasattr(editor, 'is_subgraph_container_node') and editor.is_subgraph_container_node(node_item))
         if is_subgraph:
@@ -447,6 +710,9 @@ class GraphView(QtWidgets.QGraphicsView):
             act_open_subgraph = None
             act_expand_subgraph = None
 
+        act_rename = menu.addAction("Rename Node")
+        act_rename.setShortcut(QtGui.QKeySequence("F2"))
+        menu.addSeparator()
         act_delete = menu.addAction("Delete")
         act_delete.setShortcut(QtGui.QKeySequence.Delete)
         act_cut = menu.addAction("Cut")
@@ -455,17 +721,26 @@ class GraphView(QtWidgets.QGraphicsView):
         act_copy.setShortcut(QtGui.QKeySequence.Copy)
         act_duplicate = menu.addAction("Duplicate")
         act_duplicate.setShortcut(QtGui.QKeySequence("Ctrl+D"))
+        act_save_template = menu.addAction("Save Selection as Template…")
+        act_save_template.setEnabled(bool(editor is not None and hasattr(editor, 'save_selection_as_template')))
+        act_template_libs = menu.addAction("Template Libraries…")
+        act_template_libs.setEnabled(bool(editor is not None and hasattr(editor, 'configure_template_libraries')))
         act_break_links = menu.addAction("Break Node Links")
         menu.addSeparator()
         act_properties = menu.addAction("Open Properties")
 
         chosen = menu.exec_(global_pos)
+        if self._dispatch_layout_action(chosen, layout_actions):
+            return
         if chosen is None or editor is None:
             return
         if chosen is act_open_subgraph:
             editor.open_subgraph_for_node(node_item)
         elif chosen is act_expand_subgraph:
             editor.expand_subgraph_node(node_item)
+        elif chosen is act_rename:
+            if hasattr(editor, 'rename_node_via_dialog'):
+                editor.rename_node_via_dialog(node_item)
         elif chosen is act_delete:
             editor.delete_selected_items()
         elif chosen is act_cut:
@@ -475,6 +750,12 @@ class GraphView(QtWidgets.QGraphicsView):
         elif chosen is act_duplicate:
             if hasattr(editor, 'duplicate_selection'):
                 editor.duplicate_selection()
+        elif chosen is act_save_template:
+            if hasattr(editor, 'save_selection_as_template'):
+                editor.save_selection_as_template()
+        elif chosen is act_template_libs:
+            if hasattr(editor, 'configure_template_libraries'):
+                editor.configure_template_libraries()
         elif chosen is act_break_links:
             if hasattr(editor, 'break_node_links'):
                 editor.break_node_links(node_item)
@@ -557,7 +838,7 @@ class GraphView(QtWidgets.QGraphicsView):
 
         items = []
         for item in scene.items(scene_rect, QtCore.Qt.IntersectsItemShape, QtCore.Qt.DescendingOrder):
-            if isinstance(item, (NodeItem, ConnectionItem, ConnectionPinItem)):
+            if isinstance(item, (NodeItem, ConnectionItem, ConnectionPinItem, InlineSubgraphBoundaryItem)):
                 items.append(item)
 
         modifiers = self._selection_modifiers
@@ -613,10 +894,9 @@ class GraphView(QtWidgets.QGraphicsView):
                     scene.begin_endpoint_reconnect(reconnect_connection, reconnect_endpoint, scene_pos)
                     event.accept()
                     return
-                if item.port_type == PortItem.OUTPUT:
-                    scene.begin_connection_drag(item)
-                    event.accept()
-                    return
+                scene.begin_connection_drag(item)
+                event.accept()
+                return
 
             if item is None:
                 self._begin_selection_band(event.pos(), event.modifiers())
@@ -669,6 +949,11 @@ class GraphView(QtWidgets.QGraphicsView):
         scene = self.scene()
 
         if event.button() == QtCore.Qt.RightButton:
+            if getattr(self, '_suppress_next_context_menu', False):
+                self._suppress_next_context_menu = False
+                self._right_pan_candidate = False
+                event.accept()
+                return
             was_panning = self._panning
             release_pos = event.pos()
             global_pos = event.globalPos()
@@ -690,8 +975,10 @@ class GraphView(QtWidgets.QGraphicsView):
                         scene.clearSelection()
                         item.setSelected(True)
                     self._show_node_context_menu(item, global_pos)
+                elif isinstance(item, InlineSubgraphBoundaryItem):
+                    self._show_canvas_context_menu(release_pos, global_pos)
                 else:
-                    self._show_graph_node_palette(release_pos, global_pos)
+                    self._show_canvas_context_menu(release_pos, global_pos)
                 event.accept()
                 return
 
@@ -708,12 +995,32 @@ class GraphView(QtWidgets.QGraphicsView):
 
         if event.button() == QtCore.Qt.LeftButton and scene is not None:
             item = self.itemAt(event.pos())
-            if item is None and self._selection_origin is None and not (event.modifiers() & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)):
-                scene.clearSelection()
+
+            # Connection drags must be resolved before the generic empty-canvas
+            # release handler clears selection. The preview wire itself can also
+            # be returned by itemAt(), so treat the active preview connection as
+            # an empty-canvas release when no compatible target port was snapped.
+            if scene.drag_connection:
+                drag_source_port = getattr(scene, 'drag_source_port', None)
+                drag_target_port = getattr(scene, 'drag_target_port', None)
+                drag_preview_item = getattr(scene, 'drag_connection', None)
+                release_on_empty_canvas = item is None or item is drag_preview_item
+                if drag_target_port is None and drag_source_port is not None and release_on_empty_canvas:
+                    scene.cancel_connection_drag()
+                    self._show_graph_node_palette(
+                        event.pos(),
+                        event.globalPos(),
+                        title="Insert Compatible Node",
+                        filter_fn=lambda definition, port=drag_source_port: self._definition_has_compatible_port(port, definition),
+                        connect_from_port=drag_source_port,
+                    )
+                else:
+                    scene.end_connection_drag(item)
                 event.accept()
                 return
-            if scene.drag_connection:
-                scene.end_connection_drag(item)
+
+            if item is None and self._selection_origin is None and not (event.modifiers() & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)):
+                scene.clearSelection()
                 event.accept()
                 return
             if scene.reconnect_connection:
@@ -751,6 +1058,34 @@ class GraphView(QtWidgets.QGraphicsView):
             if editor.paste():
                 event.accept()
                 return
+
+        if event.key() == QtCore.Qt.Key_Space and editor is not None:
+            self._show_graph_node_palette(self.viewport().rect().center(), self.mapToGlobal(self.viewport().rect().center()))
+            event.accept()
+            return
+
+        if editor is not None and event.modifiers() == (QtCore.Qt.ControlModifier | QtCore.Qt.AltModifier):
+            align_map = {
+                QtCore.Qt.Key_Left: 'left',
+                QtCore.Qt.Key_Right: 'right',
+                QtCore.Qt.Key_Up: 'top',
+                QtCore.Qt.Key_Down: 'bottom',
+            }
+            alignment = align_map.get(event.key())
+            if alignment and hasattr(editor, 'align_selected_nodes'):
+                if editor.align_selected_nodes(alignment):
+                    event.accept()
+                    return
+
+        if editor is not None and event.modifiers() == (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier):
+            if event.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right) and hasattr(editor, 'distribute_selected_nodes'):
+                if editor.distribute_selected_nodes('horizontal'):
+                    event.accept()
+                    return
+            if event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down) and hasattr(editor, 'distribute_selected_nodes'):
+                if editor.distribute_selected_nodes('vertical'):
+                    event.accept()
+                    return
 
         if event.key() == QtCore.Qt.Key_Escape:
             if self._selection_active or self._selection_origin is not None:
@@ -887,18 +1222,37 @@ class GraphView(QtWidgets.QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
+        if getattr(self, '_suppress_next_context_menu', False):
+            self._suppress_next_context_menu = False
+            event.accept()
+            return
         item = self.itemAt(event.pos())
         node_item = self._node_item_for_view_item(item)
         editor = getattr(self, 'editor', None)
         if node_item is not None and editor is not None:
             menu = QtWidgets.QMenu(self)
+            layout_actions = self._add_layout_actions_to_menu(menu) if self._selected_layout_item_count() >= 2 else []
+            if layout_actions:
+                menu.addSeparator()
+            rename_action = menu.addAction('Rename Node')
+            rename_action.setShortcut(QtGui.QKeySequence('F2'))
+            save_template_action = menu.addAction('Save Selection as Template…')
+            save_template_action.setEnabled(hasattr(editor, 'save_selection_as_template'))
             action = menu.addAction('Open Properties')
             dock = getattr(editor, 'dockProperties', None)
             already_open = bool(dock is not None and dock.isVisible())
             action.setEnabled(not already_open)
             chosen = menu.exec_(event.globalPos())
-            if chosen is action and not already_open:
+            if self._dispatch_layout_action(chosen, layout_actions):
+                event.accept()
+                return
+            if chosen is rename_action and hasattr(editor, 'rename_node_via_dialog'):
+                editor.rename_node_via_dialog(node_item)
+            elif chosen is save_template_action and hasattr(editor, 'save_selection_as_template'):
+                editor.save_selection_as_template()
+            elif chosen is action and not already_open:
                 editor.open_properties_for_node(node_item)
             event.accept()
             return
+        self._show_canvas_context_menu(event.pos(), event.globalPos())
         event.accept()

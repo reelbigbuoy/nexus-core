@@ -24,7 +24,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from nexus_workspace.framework.qt import QtCore
+from nexus_workspace.framework.qt import QtCore, QtWidgets
 
 from .serialization import NexusSerializable
 from .state_contract import build_plugin_tool_state, build_workspace_window_state, normalize_persisted_state
@@ -117,13 +117,84 @@ class StateManager(NexusSerializable):
 
     def _serialize_geometry(self, window) -> Dict[str, Any]:
         geom = window.geometry()
+        safe_geom = self._clamp_serialized_geometry(geom)
         return {
-            'x': geom.x(),
-            'y': geom.y(),
-            'width': geom.width(),
-            'height': geom.height(),
+            'x': safe_geom.x(),
+            'y': safe_geom.y(),
+            'width': safe_geom.width(),
+            'height': safe_geom.height(),
             'maximized': bool(window.isMaximized()),
         }
+
+    def _screen_geometries(self):
+        app = QtWidgets.QApplication.instance()
+        screens = app.screens() if app is not None else []
+        geometries = []
+        for screen in screens:
+            try:
+                available = screen.availableGeometry()
+                if available is not None and not available.isNull():
+                    geometries.append(QtCore.QRect(available))
+            except Exception:
+                pass
+        if not geometries:
+            geometries.append(QtCore.QRect(0, 0, 1280, 720))
+        return geometries
+
+    def _primary_screen_geometry(self):
+        app = QtWidgets.QApplication.instance()
+        try:
+            screen = app.primaryScreen() if app is not None else None
+            if screen is not None:
+                available = screen.availableGeometry()
+                if available is not None and not available.isNull():
+                    return QtCore.QRect(available)
+        except Exception:
+            pass
+        return self._screen_geometries()[0]
+
+    def _current_desktop_rect(self):
+        desktop = QtCore.QRect()
+        for available in self._screen_geometries():
+            desktop = desktop.united(available) if not desktop.isNull() else QtCore.QRect(available)
+        return desktop
+
+    def _intersection_area(self, a, b):
+        inter = a.intersected(b)
+        if inter.isNull():
+            return 0
+        return max(0, inter.width()) * max(0, inter.height())
+
+    def _screen_for_rect(self, rect):
+        best = None
+        best_area = 0
+        for screen_rect in self._screen_geometries():
+            area = self._intersection_area(rect, screen_rect)
+            if area > best_area:
+                best_area = area
+                best = screen_rect
+        if best is not None and best_area > 0:
+            return QtCore.QRect(best)
+        return self._primary_screen_geometry()
+
+    def _clamp_serialized_geometry(self, geom):
+        min_w, min_h = 640, 420
+        raw_width = int(geom.width() or 1200)
+        raw_height = int(geom.height() or 800)
+        candidate = QtCore.QRect(int(geom.x()), int(geom.y()), max(1, raw_width), max(1, raw_height))
+        screen_rect = self._screen_for_rect(candidate)
+        width = max(min_w, min(raw_width, max(min_w, screen_rect.width())))
+        height = max(min_h, min(raw_height, max(min_h, screen_rect.height())))
+        candidate = QtCore.QRect(candidate.x(), candidate.y(), width, height)
+        visible = candidate.intersected(screen_rect)
+        if visible.isNull() or visible.width() < 80 or visible.height() < 80:
+            x = screen_rect.x() + max(0, (screen_rect.width() - width) // 2)
+            y = screen_rect.y() + max(0, (screen_rect.height() - height) // 2)
+            return QtCore.QRect(x, y, width, height)
+        margin = 80
+        x = max(screen_rect.left() + margin - width, min(candidate.x(), screen_rect.right() - margin))
+        y = max(screen_rect.top() + margin - height, min(candidate.y(), screen_rect.bottom() - margin))
+        return QtCore.QRect(x, y, width, height)
 
     def _serialize_tools_for_window(self, workspace_manager, window):
         tools = []

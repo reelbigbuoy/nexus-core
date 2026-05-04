@@ -38,6 +38,23 @@ class MoveNodeCommand(QtWidgets.QUndoCommand):
         self._apply_pos(self.old_pos)
 
 
+class MoveInlineExpansionCommand(QtWidgets.QUndoCommand):
+    def __init__(self, editor, container_id, old_pos, new_pos):
+        super().__init__("Move Expanded Sub-Graph")
+        self.editor = editor
+        self.container_id = container_id
+        self.old_pos = QtCore.QPointF(old_pos)
+        self.new_pos = QtCore.QPointF(new_pos)
+
+    def redo(self):
+        if self.editor is not None:
+            self.editor._apply_inline_expansion_group_move(self.container_id, self.new_pos)
+
+    def undo(self):
+        if self.editor is not None:
+            self.editor._apply_inline_expansion_group_move(self.container_id, self.old_pos)
+
+
 class RenameNodeCommand(QtWidgets.QUndoCommand):
     def __init__(self, node_item, old_title, new_title):
         super().__init__(f"Rename {old_title}")
@@ -53,7 +70,7 @@ class RenameNodeCommand(QtWidgets.QUndoCommand):
             editor.editNodeTitle.setText(title)
             editor._updating_property_panel = False
             editor._property_title_before_edit = title
-            editor.on_node_mutated(self.node_item, update_editor_title=True)
+            editor.on_node_mutated(self.node_item, update_editor_title=False)
 
     def _resolve_editor(self):
         scene = self.node_item.scene()
