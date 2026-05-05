@@ -1,86 +1,153 @@
 # Nexus Core
 
-Nexus Core is an open-source modular application framework for building extensible desktop tooling environments.
+Nexus Core is an open-source, domain-agnostic desktop application platform for building and hosting plugin-based tools.
 
-Created and maintained by Reel Big Buoy Company, Nexus Core provides the shared infrastructure needed to build modern workspace-style applications with docking layouts, reusable UI primitives, command-driven interactions, plugin-based extensibility, and graph-capable workflows.
+Created and maintained by Reel Big Buoy Company, Nexus Core provides the shared infrastructure needed to build modern workspace-style applications with docking layouts, reusable UI primitives, command-driven interactions, local session persistence, plugin-based extensibility, shared data services, and reusable graph-capable framework components.
 
-Nexus Core is designed to serve as a strong foundation for developers and organizations that want to build custom tools on top of a consistent, scalable desktop platform architecture.
-
----
-
-## Overview
-
-Nexus Core focuses on providing a clean, flexible platform layer that can be used to construct a wide range of desktop applications. It emphasizes modularity, extensibility, and separation of concerns through a structured framework and plugin system.
-
-The platform is intentionally domain-agnostic and can be adapted to support many different types of tooling and workflows.
+Nexus Core standardizes **how tools are hosted, integrated, and developed**. It does not define specialized domain workflows. Domain-specific capabilities belong in separately reviewed plugins.
 
 ---
 
-## What’s Included
+## What Nexus Core Provides
 
-Nexus Core includes the foundational components required to build extensible desktop applications:
+Nexus Core includes foundational platform capabilities:
 
-- Workspace and docking system for multi-pane layouts
-- Windowing and dialog abstractions
-- Command and action frameworks
-- Shared service and context systems
-- Plugin discovery, loading, and lifecycle management
-- Theme and application state management
-- Reusable UI widgets and inspector infrastructure
-- Generic graph-capable framework components
-
----
-
-## What Nexus Core Is For
-
-Nexus Core can be used to build:
-
-- Internal desktop tools
-- Technical workspaces
-- Editor-style applications
-- Plugin-driven platforms
-- Visualization and graph-based tools
-- Custom enterprise or engineering utilities
+- Workspace and docking system for multi-pane layouts.
+- Multi-window, tabbed, floating, and dockable tool hosting.
+- Plugin discovery, manifest validation, loading, and lifecycle management.
+- Shared service registry and plugin context.
+- Event bus for decoupled communication.
+- Shared observable data store.
+- Command and action frameworks.
+- Context tracking for active tools and windows.
+- Local session and workspace state persistence.
+- Theme system and reusable UI framework.
+- Qt compatibility bridge and enhanced reusable widgets.
+- Generic graph editor framework components.
+- Bundled generic platform utility plugins.
 
 ---
 
 ## What Nexus Core Is Not
 
-Nexus Core is a platform foundation, not a complete end-user solution.
+Nexus Core is not a complete end-user solution and is not a domain-specific systems development toolkit.
 
-This repository focuses on reusable core infrastructure and bundled platform utilities. Domain-specific tools, private extensions, and proprietary plugin ecosystems may be built on top of Nexus Core separately and are not implied to be part of this repository.
+This repository does **not** provide:
+
+- proprietary business logic;
+- organization-specific data models;
+- premium plugin capabilities;
+- approval of third-party plugins.
+
+Those capabilities may be built as plugins and reviewed independently.
 
 ---
 
 ## Architecture Overview
 
-Nexus Core is structured into several major layers:
+Nexus Core is organized into several platform layers:
 
-- **Workspace Layer**  
-  Provides docking, layout management, panes, and window coordination.
+```text
+Plugins / Tools
+    ↓
+Nexus Runtime and Plugin Loader
+    ↓
+Core Services: events, data, commands, actions, context, state
+    ↓
+Framework: reusable widgets, tools, surfaces, graph services
+    ↓
+Workspace Shell: windows, panes, tabs, layout, themes
+    ↓
+Python 3.8+ / PyQt5 / Operating System
+```
 
-- **Framework Layer**  
-  Includes reusable UI components, graph support, tool abstractions, and interaction patterns.
-
-- **Core Services Layer**  
-  Handles commands, events, state management, context propagation, and shared services.
-
-- **Plugin System**  
-  Supports dynamic discovery, loading, and integration of external tools and extensions.
-
-- **Bundled Utilities**  
-  Includes a small set of generic inspector-style tools to support platform usage.
+See [`docs/architecture.md`](docs/architecture.md) for the full architecture description.
 
 ---
 
-## Getting Started
+## Repository Structure
 
-### Requirements
+```text
+nexus.py                         Application entry point
+nexus_workspace/core/            Core contracts, services, state, events, commands
+nexus_workspace/framework/       Reusable UI and tool framework
+nexus_workspace/runtime/         Bootstrap and plugin loader
+nexus_workspace/workspace/       Workspace shell, panes, windows, layout rendering
+nexus_workspace/plugins/         Platform plugin base classes and bundled utilities
+nexus_workspace/shared_widgets/  Shared workspace widgets
+nexus_workspace/graph_editor/    Domain-neutral graph editor framework
+plugins/                         Source-categorized plugin folders
+docs/                            Platform documentation
+```
 
-- Python 3.8+ (or your current supported version)
-- Required dependencies (see your requirements file if applicable)
+---
 
-### Run Nexus Core
+## Requirements
+
+- Python 3.8 or later.
+- PyQt5.
+- A desktop environment capable of running Qt applications.
+
+A standardized dependency manifest is recommended for enterprise deployment.
+
+---
+
+## Running Nexus Core
+
+From the repository root:
 
 ```bash
 python nexus.py
+```
+
+---
+
+## Plugin Model
+
+Plugins are manually placed into plugin folders and discovered through `plugin.json` manifests. Nexus Core can also load user-local plugins and plugins from paths listed in the `NEXUS_PLUGIN_PATH` environment variable.
+
+Plugins execute in-process in the same Python interpreter as Nexus Core. Only deploy trusted or reviewed plugins in controlled environments.
+
+See [`docs/plugin-author-guide.md`](docs/plugin-author-guide.md) for plugin authoring details.
+
+---
+
+## Security Posture
+
+Nexus Core is local-first and does not make outbound network calls by default. Workspace/session state is stored locally. Plugins execute in-process and must be reviewed separately.
+
+The repository uses GitHub Code Scanning for static analysis and GitHub Dependabot for dependency vulnerability monitoring.
+
+See [`SECURITY.md`](SECURITY.md) and [`docs/security.md`](docs/security.md).
+
+---
+
+## Documentation
+
+Start with [`docs/documentation-index.md`](docs/documentation-index.md).
+
+Key documents:
+
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/developer-guide.md`](docs/developer-guide.md)
+- [`docs/plugin-author-guide.md`](docs/plugin-author-guide.md)
+- [`docs/user-guide.md`](docs/user-guide.md)
+- [`docs/security.md`](docs/security.md)
+- [`docs/dependency-management.md`](docs/dependency-management.md)
+- [`docs/release-process.md`](docs/release-process.md)
+- [`docs/governance.md`](docs/governance.md)
+- [`docs/enterprise-adoption.md`](docs/enterprise-adoption.md)
+
+---
+
+## Governance
+
+Nexus Core is currently maintained by Reel Big Buoy Company with a single primary contributor. Contribution workflows are structured to support future peer review and multi-contributor governance, but current release control relies on maintainer review, automated scanning, and functional validation.
+
+See [`docs/governance.md`](docs/governance.md).
+
+---
+
+## License
+
+Nexus Core is licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).

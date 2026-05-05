@@ -1,0 +1,37 @@
+@startuml
+title Nexus Core Architecture and Trust Boundaries
+
+package "Nexus Core Release Package\nTrusted Platform Baseline" {
+  package "Built-in Plugins\nIncluded, scanned, no separate review" as BuiltIn
+  package "Official Plugins\nRepo-maintained, release-governed, no separate review" as Official
+
+  package "Nexus Core Platform" {
+    [Workspace/UI Layer]
+    [Framework Layer\nPyQt5 wrappers + enhanced widgets]
+    [Runtime Layer\nPlugin discovery + manifest loading]
+    [Core Services\nEventBus, DataStore, Command, Context]
+  }
+}
+
+package "External Plugins\nSeparate organizational review required" as External #fff7ed
+
+BuiltIn --> [Runtime Layer]
+Official --> [Runtime Layer]
+External ..> [Runtime Layer] : controlled boundary
+
+[Nexus Core Platform] --> [Python 3.8+ / PyQt5 / Local OS + Filesystem]
+
+note right of External
+External plugins are not included in
+the Nexus Core release package and
+are outside Nexus Core governance.
+end note
+
+note bottom of [Nexus Core Platform]
+No outbound network calls by default.
+Local filesystem persistence.
+In-process Python execution.
+CodeQL + Dependabot enabled.
+end note
+
+@enduml

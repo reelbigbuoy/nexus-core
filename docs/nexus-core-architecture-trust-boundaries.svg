@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1400" height="950" viewBox="0 0 1400 950" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .title { font: 700 34px Arial, sans-serif; fill: #111827; }
+      .subtitle { font: 400 18px Arial, sans-serif; fill: #374151; }
+      .boxTitle { font: 700 20px Arial, sans-serif; fill: #111827; }
+      .boxText { font: 400 15px Arial, sans-serif; fill: #374151; }
+      .small { font: 400 13px Arial, sans-serif; fill: #4b5563; }
+      .label { font: 700 15px Arial, sans-serif; fill: #111827; }
+      .trusted { fill: #e8f5e9; stroke: #2e7d32; stroke-width: 3; rx: 18; }
+      .external { fill: #fff7ed; stroke: #c2410c; stroke-width: 3; rx: 18; stroke-dasharray: 10 7; }
+      .core { fill: #eef2ff; stroke: #4338ca; stroke-width: 3; rx: 18; }
+      .layer { fill: #f8fafc; stroke: #94a3b8; stroke-width: 2; rx: 16; }
+      .platform { fill: #f1f5f9; stroke: #334155; stroke-width: 3; rx: 24; }
+      .arrow { stroke: #334155; stroke-width: 3; marker-end: url(#arrowhead); fill: none; }
+      .dashArrow { stroke: #c2410c; stroke-width: 3; marker-end: url(#arrowheadOrange); fill: none; stroke-dasharray: 8 6; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#334155"/>
+    </marker>
+    <marker id="arrowheadOrange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#c2410c"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1400" height="950" fill="#ffffff"/>
+
+  <text x="700" y="55" text-anchor="middle" class="title">Nexus Core Architecture and Trust Boundaries</text>
+  <text x="700" y="85" text-anchor="middle" class="subtitle">Application platform for hosting, developing, and integrating tooling plugins</text>
+
+  <!-- Trusted release package -->
+  <rect x="70" y="125" width="900" height="735" class="trusted"/>
+  <text x="520" y="160" text-anchor="middle" class="boxTitle">Nexus Core Release Package — Trusted Platform Baseline</text>
+  <text x="520" y="185" text-anchor="middle" class="small">Core platform + built-in and official plugins; all governed by the same release, CodeQL, and Dependabot processes</text>
+
+  <!-- Plugins included -->
+  <rect x="115" y="215" width="380" height="150" class="layer"/>
+  <text x="305" y="245" text-anchor="middle" class="boxTitle">Built-in Plugins</text>
+  <text x="140" y="278" class="boxText">• Included with Nexus Core</text>
+  <text x="140" y="303" class="boxText">• Part of trusted baseline</text>
+  <text x="140" y="328" class="boxText">• No separate review required</text>
+
+  <rect x="545" y="215" width="380" height="150" class="layer"/>
+  <text x="735" y="245" text-anchor="middle" class="boxTitle">Official Plugins</text>
+  <text x="570" y="278" class="boxText">• Maintained in repository</text>
+  <text x="570" y="303" class="boxText">• Scanned with release package</text>
+  <text x="570" y="328" class="boxText">• No separate review required</text>
+
+  <!-- Core platform -->
+  <rect x="115" y="405" width="810" height="390" class="core"/>
+  <text x="520" y="440" text-anchor="middle" class="boxTitle">Nexus Core Platform</text>
+
+  <rect x="150" y="475" width="235" height="110" class="layer"/>
+  <text x="267" y="505" text-anchor="middle" class="label">Workspace/UI Layer</text>
+  <text x="170" y="535" class="small">• Multi-window workspace</text>
+  <text x="170" y="558" class="small">• Docking / tabbing</text>
+
+  <rect x="405" y="475" width="235" height="110" class="layer"/>
+  <text x="522" y="505" text-anchor="middle" class="label">Framework Layer</text>
+  <text x="425" y="535" class="small">• PyQt5 widget wrappers</text>
+  <text x="425" y="558" class="small">• Enhanced reusable UI</text>
+
+  <rect x="660" y="475" width="235" height="110" class="layer"/>
+  <text x="777" y="505" text-anchor="middle" class="label">Runtime Layer</text>
+  <text x="680" y="535" class="small">• Plugin discovery</text>
+  <text x="680" y="558" class="small">• Manifest loading</text>
+
+  <rect x="150" y="625" width="745" height="120" class="layer"/>
+  <text x="522" y="655" text-anchor="middle" class="label">Core Services</text>
+  <text x="180" y="690" class="small">EventBus</text>
+  <text x="350" y="690" class="small">DataStore</text>
+  <text x="520" y="690" class="small">Command Service</text>
+  <text x="720" y="690" class="small">Context Service</text>
+  <text x="180" y="718" class="small">Shared events, state, commands, and active-tool context across trusted plugins</text>
+
+  <!-- External plugins -->
+  <rect x="1030" y="230" width="305" height="275" class="external"/>
+  <text x="1182" y="265" text-anchor="middle" class="boxTitle">External Plugins</text>
+  <text x="1060" y="305" class="boxText">• Not included in release package</text>
+  <text x="1060" y="335" class="boxText">• Outside Nexus Core governance</text>
+  <text x="1060" y="365" class="boxText">• Must be reviewed separately</text>
+  <text x="1060" y="395" class="boxText">• May be manually added by users</text>
+  <text x="1060" y="445" class="small">Risk boundary: external plugin approval</text>
+  <text x="1060" y="468" class="small">is governed by organizational policy.</text>
+
+  <!-- Runtime environment -->
+  <rect x="250" y="885" width="900" height="45" class="platform"/>
+  <text x="700" y="914" text-anchor="middle" class="label">Python 3.8+ Runtime  •  PyQt5  •  Local Operating System / Filesystem</text>
+
+  <!-- arrows -->
+  <path d="M305 365 C305 395, 360 395, 420 405" class="arrow"/>
+  <path d="M735 365 C735 395, 680 395, 620 405" class="arrow"/>
+  <path d="M1030 365 C990 365, 965 405, 925 440" class="dashArrow"/>
+  <path d="M520 795 L520 880" class="arrow"/>
+
+  <!-- Notes -->
+  <rect x="1030" y="555" width="305" height="190" fill="#f9fafb" stroke="#9ca3af" stroke-width="2" rx="16"/>
+  <text x="1182" y="590" text-anchor="middle" class="boxTitle">Security Posture</text>
+  <text x="1060" y="625" class="boxText">• No outbound network calls by default</text>
+  <text x="1060" y="655" class="boxText">• Local filesystem persistence</text>
+  <text x="1060" y="685" class="boxText">• In-process plugin execution</text>
+  <text x="1060" y="715" class="boxText">• Continuous CodeQL + Dependabot</text>
+</svg>

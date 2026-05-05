@@ -2,76 +2,89 @@
 
 Thank you for your interest in contributing to Nexus Core.
 
-Nexus Core is an open-source platform developed and maintained by Reel Big Buoy Company. Contributions are welcome and appreciated, and help improve the platform for the broader community.
+Nexus Core is an open-source platform developed and maintained by Reel Big Buoy Company. Contributions are welcome when they improve the reusable, domain-neutral platform.
 
----
+## Project Scope
+
+Nexus Core provides platform infrastructure:
+
+- workspace shell;
+- plugin runtime;
+- reusable UI framework;
+- command, action, context, event, service, and data infrastructure;
+- local session persistence;
+- generic graph editor framework;
+- generic platform utility plugins;
+- documentation and examples.
+
+Nexus Core should not include domain-specific workflows, proprietary business logic, or private/premium plugin capabilities.
 
 ## Getting Started
 
-Before contributing, please:
+Before contributing:
 
-- Review the README to understand the scope and purpose of Nexus Core
-- Ensure your changes align with the platform’s focus on reusable, domain-agnostic infrastructure
-- Open an issue to discuss significant changes before starting work
-
----
+1. Read the README.
+2. Review [`docs/architecture.md`](docs/architecture.md).
+3. Review [`docs/developer-guide.md`](docs/developer-guide.md).
+4. Confirm your change belongs in Nexus Core rather than a plugin.
+5. Open an issue for significant changes before implementation.
 
 ## Types of Contributions
 
-We welcome contributions such as:
+Contributions may include:
 
-- Bug fixes
-- Performance improvements
-- Documentation updates
-- General usability improvements
-- Enhancements to core framework components
-
----
+- bug fixes;
+- performance improvements;
+- documentation updates;
+- framework/widget improvements;
+- workspace usability improvements;
+- generic plugin runtime improvements;
+- generic graph framework improvements;
+- security hardening.
 
 ## Contribution Guidelines
 
-To help maintain consistency and quality:
+Please:
 
-- Keep changes focused and well-scoped
-- Follow existing code style and structure
-- Include clear and concise commit messages
-- Update documentation where applicable
-- Avoid introducing domain-specific assumptions into Nexus Core
-
-Nexus Core is intended to remain a general-purpose platform. Contributions should not introduce tightly coupled or domain-specific logic.
-
----
+- keep changes focused and well-scoped;
+- follow existing code style and project structure;
+- avoid unnecessary dependencies;
+- preserve backward compatibility where practical;
+- update documentation when behavior or public interfaces change;
+- avoid direct PyQt imports outside framework or low-level Qt integration points when a Nexus wrapper exists;
+- avoid adding domain-specific assumptions to core;
+- include explanatory comments for intentionally suppressed exceptions or no-op exception handling.
 
 ## Pull Request Process
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request with a clear description of your changes
+1. Fork the repository.
+2. Create a feature branch.
+3. Make focused changes.
+4. Run local functional validation.
+5. Review GitHub Code Scanning and Dependabot results when available.
+6. Update documentation where applicable.
+7. Submit a pull request with a clear description.
 
-All pull requests are reviewed before merging.
+Pull request workflows are supported. The project currently has a single primary contributor, so current review may be maintainer self-review supported by automated analysis and functional validation. As the project grows, workflows are intended to support independent peer review.
 
----
+## Security Contributions
+
+Do not open public issues for security vulnerabilities. See [`SECURITY.md`](SECURITY.md) for reporting instructions.
 
 ## Project Governance
 
-Nexus Core is actively maintained by Reel Big Buoy Company.
+Nexus Core is maintained under the stewardship of Reel Big Buoy Company. Project direction, architecture decisions, releases, and merge approvals remain under Reel Big Buoy Company authority.
 
-While contributions are welcome, **project direction, architecture decisions, and merge approvals remain under the stewardship of Reel Big Buoy Company**.
+Not all contributions may be accepted, especially if they:
 
-Not all contributions may be accepted, particularly if they:
+- conflict with the platform scope;
+- introduce domain-specific behavior;
+- create unnecessary dependencies;
+- reduce maintainability;
+- weaken plugin boundaries;
+- bypass security or governance expectations.
 
-- Conflict with the long-term direction of the platform
-- Introduce unnecessary complexity
-- Reduce generality or extensibility
-
----
-
-## Code of Conduct
-
-Be respectful and constructive in all interactions. Contributions should be professional and collaborative.
-
----
+See [`docs/governance.md`](docs/governance.md).
 
 ## License
 
