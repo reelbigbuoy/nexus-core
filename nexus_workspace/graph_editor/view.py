@@ -12,7 +12,7 @@
 from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from .constants import ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, FIT_PADDING
 from .definitions import NODE_REGISTRY, NodeDefinitionRegistry
-from .graphics_items import NodeItem, ConnectionItem, PortItem, ConnectionPinItem, InlineSubgraphBoundaryItem, _distance_to_segment
+from .graphics_items import NodeItem, ConnectionItem, PortItem, ConnectionPinItem, InlineSubgraphBoundaryItem, ZoneBoundaryItem, _distance_to_segment
 from .commands import AddNodeCommand, AddConnectionCommand
 from .authoring import PaletteUsageStore
 from .geometry import qpoint, qrect
@@ -444,7 +444,7 @@ class GraphView(QtWidgets.QGraphicsView):
 
         selected = [
             item for item in scene.selectedItems()
-            if isinstance(item, (NodeItem, ConnectionItem, InlineSubgraphBoundaryItem)) and item.isVisible()
+            if isinstance(item, (NodeItem, ConnectionItem, InlineSubgraphBoundaryItem, ZoneBoundaryItem)) and item.isVisible()
         ]
         # UX rule: a single selected item usually means the user wants to get
         # re-oriented, not zoom into that one node. Multiple selections frame
@@ -463,7 +463,7 @@ class GraphView(QtWidgets.QGraphicsView):
 
         graph_items = [
             item for item in scene.items()
-            if isinstance(item, (NodeItem, ConnectionItem, InlineSubgraphBoundaryItem)) and item.isVisible()
+            if isinstance(item, (NodeItem, ConnectionItem, InlineSubgraphBoundaryItem, ZoneBoundaryItem)) and item.isVisible()
         ]
         self.frame_items(graph_items)
 
@@ -483,9 +483,26 @@ class GraphView(QtWidgets.QGraphicsView):
             return None
         was_empty_graph = not any(isinstance(item, NodeItem) for item in scene.items())
         editor = getattr(self, "editor", None)
+        scope_kind, scope_id = (None, None)
+        if editor is not None and hasattr(editor, '_scope_for_scene_pos'):
+            scope_kind, scope_id = editor._scope_for_scene_pos(scene_pos)
+        elif editor is not None and hasattr(editor, '_inline_scope_for_scene_pos'):
+            scope_id = editor._inline_scope_for_scene_pos(scene_pos)
+            scope_kind = 'inline' if scope_id else None
         if editor is not None and hasattr(editor, '_can_add_node_type'):
-            if not editor._can_add_node_type(definition.type_id, show_feedback=True):
-                return None
+            try:
+                if not editor._can_add_node_type(definition.type_id, show_feedback=True, scope_id=(scope_kind, scope_id) if scope_kind else None):
+                    return None
+            except TypeError:
+                if not editor._can_add_node_type(definition.type_id, show_feedback=True):
+                    return None
+        node_properties = {}
+        if scope_kind == 'inline' and scope_id:
+            node_properties['__inline_subgraph_parent'] = scope_id
+        elif scope_kind == 'zone' and scope_id:
+            node_properties['__zone_id'] = scope_id
+            if editor is not None and hasattr(editor, '_adjust_zone_spawn_pos'):
+                scene_pos = editor._adjust_zone_spawn_pos(scope_id, scene_pos, definition)
         created_node_id = None
         undo_stack = getattr(editor, "undo_stack", None)
         if undo_stack is not None:
@@ -494,18 +511,29 @@ class GraphView(QtWidgets.QGraphicsView):
                 definition.display_name,
                 scene_pos,
                 node_type=definition.type_id,
+                properties=node_properties or None,
             )
             created_node_id = command.node_entry.get("node_data", {}).get("node_id")
             undo_stack.push(command)
+            if scope_kind == 'zone' and scope_id and editor is not None:
+                node = scene.find_node_by_id(created_node_id) if created_node_id and hasattr(scene, 'find_node_by_id') else None
+                if node is not None and hasattr(editor, '_mark_zone_node'):
+                    editor._mark_zone_node(node, scope_id)
         else:
             node = scene.add_node(
                 definition.display_name,
                 scene_pos,
                 node_type=definition.type_id,
+                properties=node_properties or None,
             )
             created_node_id = getattr(getattr(node, "node_data", None), "node_id", None)
 
         node_item = scene.find_node_by_id(created_node_id) if created_node_id and hasattr(scene, 'find_node_by_id') else None
+        if node_item is not None and scope_id and editor is not None:
+            if scope_kind == 'inline' and hasattr(editor, '_mark_inline_node_editable'):
+                editor._mark_inline_node_editable(node_item, scope_id)
+            elif scope_kind == 'zone' and hasattr(editor, '_mark_zone_node'):
+                editor._mark_zone_node(node_item, scope_id)
         if was_empty_graph:
             self._frame_first_node_after_spawn(created_node_id)
         return node_item
@@ -689,8 +717,26 @@ class GraphView(QtWidgets.QGraphicsView):
 
         Blank-canvas right-click is graph authoring, regardless of current
         selection.  Node-specific menus are only shown when the actual click
-        lands on a node item.
+        lands on a node item.  If the click is inside an inline-expanded
+        subgraph boundary, the palette is filtered to that child graph's scope.
         """
+        editor = getattr(self, 'editor', None)
+        scene_pos = self.mapToScene(local_pos)
+        scope_kind, scope_id = (None, None)
+        if editor is not None and hasattr(editor, '_scope_for_scene_pos'):
+            scope_kind, scope_id = editor._scope_for_scene_pos(scene_pos)
+        elif editor is not None and hasattr(editor, '_inline_scope_for_scene_pos'):
+            scope_id = editor._inline_scope_for_scene_pos(scene_pos)
+            scope_kind = 'inline' if scope_id else None
+        if scope_kind == 'inline' and editor is not None and hasattr(editor, '_node_type_allowed_in_scope'):
+            title = 'Actions for Expanded Sub-Graph'
+            self._show_graph_node_palette(local_pos, global_pos, title=title, filter_fn=lambda definition: editor._node_type_allowed_in_scope(getattr(definition, 'type_id', None), scope_id))
+            return
+        if scope_kind == 'zone' and editor is not None and hasattr(editor, '_node_type_allowed_in_zone'):
+            zone = editor._zone_definition(scope_id) if hasattr(editor, '_zone_definition') else None
+            title = 'Actions for Zone: %s' % (getattr(zone, 'label', scope_id))
+            self._show_graph_node_palette(local_pos, global_pos, title=title, filter_fn=lambda definition: editor._node_type_allowed_in_zone(getattr(definition, 'type_id', None), scope_id))
+            return
         self._show_graph_node_palette(local_pos, global_pos)
 
     def _show_node_context_menu(self, node_item, global_pos):
@@ -877,9 +923,8 @@ class GraphView(QtWidgets.QGraphicsView):
             item = self.itemAt(event.pos())
             scene_pos = self.mapToScene(event.pos())
 
-            if self._is_inline_preview_item(item):
-                event.accept()
-                return
+            # Inline-expanded subgraphs are editable scoped child graphs.
+            # Do not block mouse events for their nodes/ports here.
 
             if isinstance(item, ConnectionItem):
                 endpoint = item.endpoint_hit(scene_pos)

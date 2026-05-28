@@ -30,7 +30,7 @@ from nexus_workspace.framework.qt import QtCore
 class GraphCommandDescriptor:
     """Generic authoring command metadata.
 
-    This is intentionally domain-neutral. Tools such as STAT may register
+    This is intentionally domain-neutral. Tools may register
     domain commands elsewhere, but the shared graph framework only stores and
     resolves generic command descriptors.
     """

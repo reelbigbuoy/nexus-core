@@ -12,7 +12,7 @@
 from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 from nexus_workspace.core.themes import THEMES
 from .constants import NODE_WIDTH, TITLE_HEIGHT, PORT_RADIUS, PORT_SPACING, NODE_CORNER_RADIUS, GRID_SIZE
-from .definitions import TestNodeData, node_definition_for_type
+from .definitions import TestNodeData, NodePortDefinition, node_definition_for_type
 from .models import GraphConnectionData
 
 
@@ -274,10 +274,14 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         self.validation_messages = []
 
 
-        self.setZValue(-2 if self.is_projection else -1)
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, not self.is_projection)
-        self.setAcceptHoverEvents(not self.is_projection)
-        self.setAcceptedMouseButtons(QtCore.Qt.NoButton if self.is_projection else QtCore.Qt.LeftButton)
+        self.setZValue(4 if self.is_projection else -1)
+        # Projection wires are not serialized as graph connections, but many of
+        # them represent real hidden parent/subgraph model wires while a
+        # container is expanded. Keep them interactive so selecting/deleting a
+        # visible expanded wire can be mapped back to the real connection.
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
+        self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
 
         if self.register_with_ports and self.source_port:
             self.source_port.add_connection(self)
@@ -355,10 +359,11 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         width = getattr(style, 'width', None) or default_width
         pen_style = _pen_style_from_name(getattr(style, 'pen_style', None)) if style is not None else default_pen_style
         if getattr(self, 'is_projection', False):
-            # Projection wires are visual-only continuity bridges for expanded
-            # subgraphs. Keep the normal connection color/kind, but make them
-            # non-interactive and slightly lighter than real model wires.
-            color.setAlpha(190)
+            # Inline projection wires are model-backed visual bridges. They stay
+            # slightly lighter than normal wires so users can distinguish the
+            # expanded-boundary projection, but they remain selectable/deletable
+            # through the underlying parent or child-subgraph connection.
+            color.setAlpha(205)
             width = max(width, 2.8)
             pen_style = QtCore.Qt.SolidLine
         if self.preview_mode:
@@ -405,16 +410,13 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         self.update()
 
     def itemChange(self, change, value):
-        if getattr(self, 'is_projection', False) and change == QtWidgets.QGraphicsItem.ItemSelectedHasChanged:
-            try:
-                if bool(value):
-                    self.setSelected(False)
-            except Exception:
-                pass
-            return super().itemChange(change, value)
         if change == QtWidgets.QGraphicsItem.ItemSelectedHasChanged:
+            # Projection wires are visible stand-ins for hidden parent/subgraph
+            # model connections while a container is expanded.  They must remain
+            # selectable so Delete can map back to the real connection.
             self.refresh_style()
-            self.sync_pin_items()
+            if not getattr(self, 'is_projection', False):
+                self.sync_pin_items()
         return super().itemChange(change, value)
 
     def remove_from_ports(self):
@@ -453,7 +455,10 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
                 self.sync_pin_items()
 
     def pins_should_be_visible(self):
-        return not self.preview_mode and not getattr(self, 'is_projection', False)
+        # Projection wires in expanded subgraphs are model-backed stand-ins for
+        # hidden real wires. They need normal interaction affordances while the
+        # container is expanded: single-click selection and route-point handles.
+        return not self.preview_mode
 
     def sync_pin_items(self):
         scene = self.scene()
@@ -550,18 +555,12 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         self.update_path()
 
     def hoverEnterEvent(self, event):
-        if getattr(self, 'is_projection', False):
-            event.ignore()
-            return
         self._hovered = True
         self.refresh_style()
         self.sync_pin_items()
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
-        if getattr(self, 'is_projection', False):
-            event.ignore()
-            return
         self._hovered = False
         self.refresh_style()
         self.sync_pin_items()
@@ -569,15 +568,17 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
 
 
     def mousePressEvent(self, event):
-        if getattr(self, 'is_projection', False):
-            event.ignore()
+        if event.button() == QtCore.Qt.LeftButton:
+            scene = self.scene()
+            if scene is not None and not (event.modifiers() & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)):
+                scene.clearSelection()
+            self.setSelected(True)
+            self.sync_pin_items()
+            event.accept()
             return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        if getattr(self, 'is_projection', False):
-            event.ignore()
-            return
         super().mouseDoubleClickEvent(event)
 
     def shape(self):
@@ -593,7 +594,7 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
         clean_option.state &= ~QtWidgets.QStyle.State_Selected
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
 
-        if (not getattr(self, 'is_projection', False)) and (self.isSelected() or self._hovered or self._active_edit or self.preview_mode or self.path_highlight_state != 'normal'):
+        if self.isSelected() or self._hovered or self._active_edit or self.preview_mode or self.path_highlight_state != 'normal':
             scene = self.scene()
             theme = scene.theme if scene and hasattr(scene, "theme") else THEMES["Midnight"]
             base_color = QtGui.QColor(theme.get("wire_selected", theme.get("node_selected", theme.get("accent", theme["connection"]))))
@@ -608,7 +609,7 @@ class ConnectionItem(QtWidgets.QGraphicsPathItem):
             painter.restore()
 
         super().paint(painter, clean_option, widget)
-        if not self.preview_mode and not getattr(self, 'is_projection', False):
+        if not self.preview_mode:
             handle_pen = QtGui.QPen(QtGui.QColor(32, 32, 32), 1.0)
             handle_brush = QtGui.QBrush(QtGui.QColor(200, 200, 200) if self.isSelected() else QtGui.QColor(120, 120, 120))
             painter.setPen(handle_pen)
@@ -629,7 +630,10 @@ class InlineSubgraphBoundaryItem(QtWidgets.QGraphicsItem):
         self.container_node_id = container_node_id
         self.title = str(title or 'Sub-Graph')
         self._rect = QtCore.QRectF(rect)
-        self.setZValue(1000)
+        # Keep the editable boundary behind nodes so dragging a child node
+        # inside the expanded subgraph manipulates the node, not the boundary.
+        # The boundary remains clickable from empty interior/title areas.
+        self.setZValue(1)
         self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
         self.setFlags(
             QtWidgets.QGraphicsItem.ItemIsSelectable |
@@ -642,6 +646,20 @@ class InlineSubgraphBoundaryItem(QtWidgets.QGraphicsItem):
 
     def boundingRect(self):
         return self._rect.adjusted(-6, -6, 6, 6)
+
+    def shape(self):
+        # Do not make the full interior of an expanded subgraph boundary an
+        # input target.  Internal child wires/nodes must receive normal mouse
+        # events while the boundary is expanded.  Keep only the title strip,
+        # collapse button area, and a thin border band interactive.
+        path = QtGui.QPainterPath()
+        path.addRect(self._title_rect().adjusted(-4.0, -4.0, 4.0, 4.0))
+        border = QtGui.QPainterPath()
+        border.addRoundedRect(self._rect, 12.0, 12.0)
+        stroker = QtGui.QPainterPathStroker()
+        stroker.setWidth(16.0)
+        path.addPath(stroker.createStroke(border))
+        return path
 
     def _title_rect(self):
         return QtCore.QRectF(self._rect.left(), self._rect.top(), self._rect.width(), self.TITLE_HEIGHT)
@@ -786,6 +804,174 @@ class InlineSubgraphBoundaryItem(QtWidgets.QGraphicsItem):
         super().mouseDoubleClickEvent(event)
 
 
+class ZoneBoundaryItem(QtWidgets.QGraphicsItem):
+    """Persistent dashed boundary for an embedded graph zone.
+
+    Zones are not subgraph containers and do not own a separate graph document.
+    The boundary still exposes default execution adapter ports so the parent
+    graph can show/control the intended left-to-right flow through prescribed
+    zones.  These ports are lightweight visual/interaction anchors owned by
+    the embedded zone boundary.
+    """
+    TITLE_HEIGHT = 30.0
+
+    def __init__(self, editor, zone_id, rect, title='Zone', ports_enabled=True):
+        super().__init__()
+        self.editor = editor
+        self.zone_id = str(zone_id or '')
+        self.title = str(title or self.zone_id or 'Zone')
+        self._rect = QtCore.QRectF(rect)
+        self.ports_enabled = bool(ports_enabled)
+        self.node_data = TestNodeData(
+            'zone.boundary',
+            self.title,
+            properties={'__zone_boundary': True, '__zone_id': self.zone_id},
+            node_id='zone:%s' % self.zone_id,
+        )
+        self.inputs = []
+        self.outputs = []
+        self._port_items = []
+        self.set_ports_enabled(self.ports_enabled)
+        self.setZValue(0.5)
+        self.setAcceptedMouseButtons(QtCore.Qt.LeftButton | QtCore.Qt.RightButton)
+        self.setFlags(QtWidgets.QGraphicsItem.ItemIsSelectable | QtWidgets.QGraphicsItem.ItemSendsGeometryChanges)
+        self._drag_press_scene_pos = None
+        self._drag_start_rect = None
+        self._drag_started = False
+
+    @property
+    def width(self):
+        return self._rect.width()
+
+    def set_ports_enabled(self, enabled):
+        """Enable/disable optional zone boundary execution ports.
+
+        Zone ports are manifest-controlled visual flow anchors.  Disabled ports
+        are hidden and removed from the boundary input/output lists so they do
+        not participate in hit testing, connection creation, or serialization.
+        """
+        enabled = bool(enabled)
+        if enabled == bool(getattr(self, 'ports_enabled', False)) and (self.inputs or self.outputs or not enabled):
+            self._position_default_exec_ports()
+            return
+        self.ports_enabled = enabled
+        for port in list(getattr(self, '_port_items', []) or []):
+            try:
+                port.setVisible(False)
+                port.setEnabled(False)
+            except Exception:
+                pass
+        self.inputs = []
+        self.outputs = []
+        if not enabled:
+            self.update()
+            return
+        in_def = NodePortDefinition('exec_in', 'Exec In', 'input', data_type='exec', connection_kind='exec', multi_connection=False)
+        out_def = NodePortDefinition('exec_out', 'Exec Out', 'output', data_type='exec', connection_kind='exec', multi_connection=True)
+        in_port = PortItem(self, 'Exec In', PortItem.INPUT, 0)
+        out_port = PortItem(self, 'Exec Out', PortItem.OUTPUT, 0)
+        in_port.definition_port = in_def
+        out_port.definition_port = out_def
+        self.inputs = [in_port]
+        self.outputs = [out_port]
+        self._port_items = [in_port, out_port]
+        self._position_default_exec_ports()
+        self.update()
+
+    def _position_default_exec_ports(self):
+        if not bool(getattr(self, 'ports_enabled', True)):
+            return
+        y = self._rect.top() + self.TITLE_HEIGHT + max(52.0, (self._rect.height() - self.TITLE_HEIGHT) * 0.5)
+        if self.inputs:
+            self.inputs[0].setPos(self._rect.left(), y)
+        if self.outputs:
+            self.outputs[0].setPos(self._rect.right(), y)
+
+    def set_rect(self, rect):
+        self.prepareGeometryChange()
+        self._rect = QtCore.QRectF(rect)
+        self.node_data.title = self.title
+        self.node_data.properties['__zone_id'] = self.zone_id
+        self._position_default_exec_ports()
+        self.update()
+
+    def boundingRect(self):
+        return self._rect.adjusted(-6, -6, 6, 6)
+
+    def shape(self):
+        path = QtGui.QPainterPath()
+        path.addRect(self._title_rect().adjusted(-4.0, -4.0, 4.0, 4.0))
+        border = QtGui.QPainterPath()
+        border.addRoundedRect(self._rect, 12.0, 12.0)
+        stroker = QtGui.QPainterPathStroker()
+        stroker.setWidth(16.0)
+        path.addPath(stroker.createStroke(border))
+        return path
+
+    def _title_rect(self):
+        return QtCore.QRectF(self._rect.left(), self._rect.top(), self._rect.width(), self.TITLE_HEIGHT)
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        scene = self.scene()
+        theme = scene.theme if scene is not None and hasattr(scene, 'theme') else THEMES['Midnight']
+        border = QtGui.QColor(theme.get('node_selected', '#6aa9ff'))
+        fill = QtGui.QColor(theme.get('node_bg', '#20242b'))
+        title_fill = QtGui.QColor(theme.get('node_title', '#2c3440'))
+        text_color = QtGui.QColor(theme.get('text', '#ffffff'))
+        fill.setAlpha(20)
+        border_width = 2.5 if self.isSelected() else 1.8
+        painter.setPen(QtGui.QPen(border, border_width, QtCore.Qt.DashLine))
+        painter.setBrush(QtGui.QBrush(fill))
+        painter.drawRoundedRect(self._rect, 12, 12)
+        title_rect = self._title_rect()
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QBrush(title_fill))
+        painter.drawRoundedRect(title_rect, 12, 12)
+        painter.drawRect(QtCore.QRectF(title_rect.left(), title_rect.bottom() - 12.0, title_rect.width(), 12.0))
+        painter.setPen(QtGui.QPen(border, border_width, QtCore.Qt.DashLine))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawRoundedRect(self._rect, 12, 12)
+        font = painter.font(); font.setBold(True); painter.setFont(font)
+        painter.setPen(QtGui.QPen(text_color))
+        painter.drawText(title_rect.adjusted(12, 0, -12, 0), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, self.title)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.RightButton and self.editor is not None and hasattr(self.editor, 'show_zone_context_menu'):
+            view = self.scene().views()[0] if self.scene() is not None and self.scene().views() else None
+            if view is not None:
+                self.editor.show_zone_context_menu(self.zone_id, event.scenePos(), event.screenPos())
+                event.accept(); return
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_press_scene_pos = QtCore.QPointF(event.scenePos())
+            self._drag_start_rect = QtCore.QRectF(self._rect)
+            self._drag_started = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_press_scene_pos is not None and self.editor is not None and hasattr(self.editor, '_move_zone_boundary_drag'):
+            delta = QtCore.QPointF(event.scenePos() - self._drag_press_scene_pos)
+            if abs(delta.x()) > 1.0 or abs(delta.y()) > 1.0:
+                self._drag_started = True
+                self.editor._move_zone_boundary_drag(self.zone_id, self._drag_start_rect, delta, final=False)
+                event.accept(); return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and self._drag_press_scene_pos is not None:
+            if self._drag_started and self.editor is not None and hasattr(self.editor, '_move_zone_boundary_drag'):
+                delta = QtCore.QPointF(event.scenePos() - self._drag_press_scene_pos)
+                self.editor._move_zone_boundary_drag(self.zone_id, self._drag_start_rect, delta, final=True)
+                self._drag_press_scene_pos = None
+                self._drag_start_rect = None
+                self._drag_started = False
+                event.accept(); return
+            self._drag_press_scene_pos = None
+            self._drag_start_rect = None
+            self._drag_started = False
+        super().mouseReleaseEvent(event)
+
+
 class NodeItem(QtWidgets.QGraphicsItem):
     def __init__(self, node_data: TestNodeData, inputs=None, outputs=None):
         super().__init__()
@@ -807,6 +993,7 @@ class NodeItem(QtWidgets.QGraphicsItem):
             QtWidgets.QGraphicsItem.ItemIsSelectable |
             QtWidgets.QGraphicsItem.ItemSendsGeometryChanges
         )
+        self.setZValue(5)
         self.setCacheMode(QtWidgets.QGraphicsItem.DeviceCoordinateCache)
 
         self._drag_start_pos = None
@@ -1216,11 +1403,23 @@ class NodeItem(QtWidgets.QGraphicsItem):
 
     def itemChange(self, change, value):
         if change == QtWidgets.QGraphicsItem.ItemPositionChange:
+            proposed = QtCore.QPointF(value)
+            scene = self.scene()
+            editor = None
+            try:
+                editor = getattr(scene.views()[0], 'editor', None) if scene is not None and scene.views() else None
+            except Exception:
+                editor = None
+            if editor is not None and hasattr(editor, '_constrain_zone_node_position'):
+                proposed = editor._constrain_zone_node_position(self, proposed)
             if getattr(self, '_interactive_drag_active', False):
-                return QtCore.QPointF(value)
-            x = round(value.x() / GRID_SIZE) * GRID_SIZE
-            y = round(value.y() / GRID_SIZE) * GRID_SIZE
-            return QtCore.QPointF(x, y)
+                return proposed
+            x = round(proposed.x() / GRID_SIZE) * GRID_SIZE
+            y = round(proposed.y() / GRID_SIZE) * GRID_SIZE
+            snapped = QtCore.QPointF(x, y)
+            if editor is not None and hasattr(editor, '_constrain_zone_node_position'):
+                snapped = editor._constrain_zone_node_position(self, snapped)
+            return snapped
 
         if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
             self.node_data.x = self.pos().x()
@@ -1261,6 +1460,18 @@ class NodeItem(QtWidgets.QGraphicsItem):
             if scene is not None and hasattr(scene, "ensure_logical_scene_rect"):
                 scene.ensure_logical_scene_rect(self.sceneBoundingRect())
 
+            if scene is not None:
+                try:
+                    editor = getattr(scene.views()[0], 'editor', None) if scene.views() else None
+                    if getattr(self, '_inline_subgraph_parent_id', None):
+                        if editor is not None and hasattr(editor, '_handle_inline_node_position_changed'):
+                            editor._handle_inline_node_position_changed(self)
+                    else:
+                        if editor is not None and hasattr(editor, '_handle_parent_node_position_changed'):
+                            editor._handle_parent_node_position_changed(self)
+                except RuntimeError:
+                    pass
+
         return super().itemChange(change, value)
 
     def to_dict(self):
@@ -1269,6 +1480,96 @@ class NodeItem(QtWidgets.QGraphicsItem):
             "inputs": self.input_names,
             "outputs": self.output_names,
         }
+
+
+class InlineBoundaryInterfaceNodeItem(NodeItem):
+    """Port-only node used by inline-expanded subgraphs.
+
+    The item gives projection wires real PortItem endpoints on the dashed
+    boundary without rendering a normal node body or participating in graph
+    serialization.  Each logical boundary port has an input and an output port
+    at the same scene position so parent-side wires and child-side wires can
+    meet at the same visible interface point.
+    """
+
+    def __init__(self, node_data: TestNodeData, names=None, side='left'):
+        names = [str(name) for name in (names or []) if str(name or '').strip()]
+        super().__init__(node_data=node_data, inputs=list(names), outputs=list(names))
+        self._inline_boundary_interface = True
+        self._inline_boundary_side = str(side or 'left')
+        self._interface_label_width = 126.0
+        # Boundary interface ports need more vertical air than normal node
+        # ports.  These labels are intentionally compact, but when the stack
+        # uses the standard node spacing the lower label can visually read as
+        # belonging to the upper port.  Keep a dedicated spacing for the
+        # boundary interface so each label/anchor pair has a clear grouping.
+        self._interface_port_spacing = 42.0
+        self.width = 0.0
+        self.height = max(24.0, 24.0 + max(0, len(names) - 1) * self._interface_port_spacing)
+        self.setZValue(8)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, False)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, False)
+        self.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+        self.setAcceptHoverEvents(False)
+        self._reposition_interface_ports()
+
+    def _reposition_interface_ports(self):
+        for idx, port in enumerate(list(self.inputs) or []):
+            port.index = idx
+            port.setPos(0.0, idx * self._interface_port_spacing)
+        for idx, port in enumerate(list(self.outputs) or []):
+            port.index = idx
+            port.setPos(0.0, idx * self._interface_port_spacing)
+
+    def boundingRect(self):
+        spacing = float(getattr(self, '_interface_port_spacing', PORT_SPACING))
+        h = max(24.0, 24.0 + max(0, len(self.input_names) - 1) * spacing)
+        # Give labels room above their wire anchor instead of directly on the
+        # spline path. This keeps the wire endpoint centered on the dashed edge
+        # while avoiding text/wire collision.
+        if self._inline_boundary_side == 'right':
+            return QtCore.QRectF(-self._interface_label_width - 20.0, -26.0, self._interface_label_width + 34.0, h + 42.0)
+        return QtCore.QRectF(-14.0, -26.0, self._interface_label_width + 34.0, h + 42.0)
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        scene = self.scene()
+        theme = scene.theme if scene is not None and hasattr(scene, 'theme') else THEMES['Midnight']
+        text_color = QtGui.QColor(theme.get('text', '#ffffff'))
+        text_color.setAlpha(225)
+        bg_color = QtGui.QColor(theme.get('panel_bg', theme.get('app_bg', '#1f2230')))
+        bg_color.setAlpha(205)
+        border_color = QtGui.QColor(theme.get('connection', '#7f8cff'))
+        border_color.setAlpha(80)
+        font = painter.font()
+        font.setPointSize(max(7, font.pointSize() - 1))
+        painter.setFont(font)
+        names = list(self.input_names or self.output_names or [])
+        metrics = QtGui.QFontMetrics(font)
+        spacing = float(getattr(self, '_interface_port_spacing', PORT_SPACING))
+        for idx, name in enumerate(names):
+            y = idx * spacing
+            text = str(name)
+            text_width = min(self._interface_label_width - 18.0, max(42.0, float(metrics.horizontalAdvance(text)) + 14.0))
+            # Labels are drawn above the anchor centerline, never centered on it.
+            # This prevents the boundary-to-node wire from running through the
+            # readable label.
+            if self._inline_boundary_side == 'right':
+                rect = QtCore.QRectF(-text_width - 16.0, y - 25.0, text_width, 18.0)
+                align = QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+            else:
+                rect = QtCore.QRectF(16.0, y - 25.0, text_width, 18.0)
+                align = QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+            painter.setPen(QtGui.QPen(border_color, 1.0))
+            painter.setBrush(QtGui.QBrush(bg_color))
+            painter.drawRoundedRect(rect, 5.0, 5.0)
+            painter.setPen(QtGui.QPen(text_color))
+            painter.drawText(rect.adjusted(6.0, 0.0, -6.0, 0.0), align, text)
+
+    def to_dict(self):
+        data = super().to_dict()
+        data.setdefault('node_data', {}).setdefault('properties', {})['__inline_boundary_interface'] = True
+        return data
 
 
 def _build_smoothed_polyline_path(

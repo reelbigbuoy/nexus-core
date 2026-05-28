@@ -270,7 +270,7 @@ NODE_DEFINITION_LOADER = NodeDefinitionLoader(NODE_REGISTRY)
 
 # Plugin-owned node definitions may be registered by plugin adapters.
 # The shared graph framework owns only generic graph behavior and generic node
-# definitions. Domain-specific nodes, such as STAT nodes, stay physically inside
+# definitions. Domain-specific nodes stay physically inside
 # their plugin directory and are loaded through this extension point.
 _ADDITIONAL_NODE_DEFINITION_DIRS = []
 
