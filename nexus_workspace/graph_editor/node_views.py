@@ -82,6 +82,19 @@ class NodeViewRules:
 
 
 @dataclass
+class NodeZoneDefinition:
+    zone_id: str
+    label: str = ""
+    order: int = 0
+    ports_enabled: bool = True
+    include_type_ids: List[str] = field(default_factory=list)
+    exclude_type_ids: List[str] = field(default_factory=list)
+    include_categories: List[str] = field(default_factory=list)
+    exclude_categories: List[str] = field(default_factory=list)
+    rules: NodeViewRules = field(default_factory=NodeViewRules)
+
+
+@dataclass
 class NodeViewDefinition:
     view_id: str
     name: str
@@ -94,6 +107,7 @@ class NodeViewDefinition:
     is_default: bool = False
     rules: NodeViewRules = field(default_factory=NodeViewRules)
     connection_styles: Dict[str, NodeConnectionStyle] = field(default_factory=dict)
+    zones: List[NodeZoneDefinition] = field(default_factory=list)
     source_path: Optional[str] = None
 
 
@@ -193,10 +207,50 @@ class NodeViewLoader:
                 cycle_checked_connection_kinds=[str(item).strip().lower() for item in list(rules_data.get("cycle_checked_connection_kinds", ["exec", "requirement"]) or ["exec", "requirement"]) if str(item).strip()],
             ),
             connection_styles={str(kind).strip().lower(): self._parse_connection_style(style) for kind, style in dict(connection_styles_data).items() if str(kind).strip()},
+            zones=[self._parse_zone(item) for item in list(data.get("zones", []) or [])],
             source_path=str(file_path),
         )
         self.registry.register(definition)
         return definition
+
+    @classmethod
+    def _parse_rules(cls, rules_data):
+        rules_data = rules_data or {}
+        return NodeViewRules(
+            allow_cycles=bool(rules_data.get("allow_cycles", True)),
+            allow_self_connections=bool(rules_data.get("allow_self_connections", False)),
+            max_nodes=rules_data.get("max_nodes"),
+            max_nodes_per_type=dict(rules_data.get("max_nodes_per_type", {}) or {}),
+            required_categories=list(rules_data.get("required_categories", []) or []),
+            required_type_ids=list(rules_data.get("required_type_ids", []) or []),
+            enforce_data_type_compatibility=bool(rules_data.get("enforce_data_type_compatibility", False)),
+            allowed_connection_category_rules=[cls._parse_category_rule(item) for item in list(rules_data.get("allowed_connection_category_rules", []) or [])],
+            blocked_connection_category_rules=[cls._parse_category_rule(item) for item in list(rules_data.get("blocked_connection_category_rules", []) or [])],
+            allowed_connection_data_type_rules=[cls._parse_data_type_rule(item) for item in list(rules_data.get("allowed_connection_data_type_rules", []) or [])],
+            blocked_connection_data_type_rules=[cls._parse_data_type_rule(item) for item in list(rules_data.get("blocked_connection_data_type_rules", []) or [])],
+            allowed_connection_kind_rules=[cls._parse_connection_kind_rule(item) for item in list(rules_data.get("allowed_connection_kind_rules", []) or [])],
+            blocked_connection_kind_rules=[cls._parse_connection_kind_rule(item) for item in list(rules_data.get("blocked_connection_kind_rules", []) or [])],
+            allowed_connection_node_type_rules=[cls._parse_node_type_rule(item) for item in list(rules_data.get("allowed_connection_node_type_rules", []) or [])],
+            blocked_connection_node_type_rules=[cls._parse_node_type_rule(item) for item in list(rules_data.get("blocked_connection_node_type_rules", []) or [])],
+            required_nodes=[cls._parse_required_node(item) for item in list(rules_data.get("required_nodes", []) or [])],
+            cycle_checked_connection_kinds=[str(item).strip().lower() for item in list(rules_data.get("cycle_checked_connection_kinds", ["exec", "requirement"]) or ["exec", "requirement"]) if str(item).strip()],
+        )
+
+    @classmethod
+    def _parse_zone(cls, data):
+        data = data or {}
+        raw_node_types = data.get("node_types", data.get("include_type_ids", [])) or []
+        return NodeZoneDefinition(
+            zone_id=str(data.get("id") or data.get("zone_id") or "").strip(),
+            label=str(data.get("label") or data.get("name") or data.get("id") or "Zone"),
+            order=int(data.get("order", 0) or 0),
+            ports_enabled=bool(data.get("ports_enabled", data.get("exec_ports_enabled", data.get("zone_ports_enabled", True)))),
+            include_type_ids=[str(item) for item in list(raw_node_types) if str(item).strip()],
+            exclude_type_ids=[str(item) for item in list(data.get("exclude_type_ids", []) or []) if str(item).strip()],
+            include_categories=[str(item) for item in list(data.get("include_categories", []) or []) if str(item).strip()],
+            exclude_categories=[str(item) for item in list(data.get("exclude_categories", []) or []) if str(item).strip()],
+            rules=cls._parse_rules(data.get("rules", {}) or {}),
+        )
 
     @staticmethod
     def _parse_category_rule(data):

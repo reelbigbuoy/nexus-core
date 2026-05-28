@@ -43,5 +43,35 @@
       "width": 2.5,
       "pen_style": "solid"
     }
-  }
+  },
+  "zones": [
+    {
+      "id": "setup",
+      "label": "Setup",
+      "order": 10,
+      "node_types": [
+        "stage_node",
+        "tom_node"
+      ]
+    },
+    {
+      "id": "execution",
+      "label": "Execution",
+      "order": 20,
+      "node_types": [
+        "test_entry_node",
+        "test_entry_node_2",
+        "table.table_data"
+      ]
+    },
+    {
+      "id": "teardown",
+      "label": "Teardown",
+      "order": 30,
+      "node_types": [
+        "stage_node",
+        "tom_node"
+      ]
+    }
+  ]
 }
