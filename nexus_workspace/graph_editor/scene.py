@@ -157,6 +157,12 @@ class GraphScene(QtWidgets.QGraphicsScene):
 
     def add_node_from_data(self, node_data: TestNodeData, inputs=None, outputs=None):
         node = NodeItem(node_data=node_data, inputs=inputs, outputs=outputs)
+        props = getattr(node_data, "properties", {}) or {}
+        if isinstance(props, dict) and props.get("__zone_id"):
+            try:
+                node._zone_id = props.get("__zone_id")
+            except Exception:
+                pass
         self.addItem(node)
         node.setPos(QtCore.QPointF(node_data.x, node_data.y))
         self.ensure_logical_scene_rect(node.sceneBoundingRect())
@@ -198,6 +204,12 @@ class GraphScene(QtWidgets.QGraphicsScene):
             return existing
 
         node = self.add_node_from_data(node_data, inputs=inputs, outputs=outputs)
+        props = getattr(node_data, "properties", {}) or {}
+        if isinstance(props, dict) and props.get("__zone_id"):
+            try:
+                node._zone_id = props.get("__zone_id")
+            except Exception:
+                pass
         if select_new:
             self.clearSelection()
             node.setSelected(True)

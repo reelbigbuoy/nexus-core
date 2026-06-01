@@ -199,6 +199,7 @@ def normalize_persisted_state(payload: Optional[Dict[str, Any]]) -> Dict[str, An
         },
         'session': {
             'next_tool_number': payload.get('next_tool_number', 1),
+            'tab_groups': list(payload.get('tab_groups', []) or []),
             'windows': windows,
         },
     }

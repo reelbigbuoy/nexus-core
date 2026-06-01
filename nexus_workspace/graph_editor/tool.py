@@ -27,7 +27,7 @@ from .view import GraphView
 from .scene import GraphScene
 from .commands import AddNodeCommand, DeleteItemsCommand, MoveNodeCommand, MoveInlineExpansionCommand, PasteItemsCommand, RenameNodeCommand, SetNodePropertyCommand
 from .definitions import NODE_REGISTRY, NODE_DEFINITIONS_DIR, load_external_node_definitions, node_definition_for_type, create_node_entry
-from .node_views import NODE_VIEW_MANIFESTS_DIR, NODE_VIEW_REGISTRY, NodeViewSession, NodeViewRules, load_node_views
+from .node_views import NODE_VIEW_MANIFESTS_DIR, NODE_VIEW_REGISTRY, NodeViewSession, NodeViewRules, load_node_views, iter_node_view_manifest_dirs
 from .graphics_items import NodeItem, ConnectionItem, ConnectionPinItem, InlineSubgraphBoundaryItem, InlineBoundaryInterfaceNodeItem, ZoneBoundaryItem
 from .models import GraphConnectionData
 from .graph_integrity import GraphIdRewriter, graph_json_safe
@@ -87,7 +87,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         # Keep graph-type lock state synchronized with graph content changes.
         # Commands are used for normal node add/delete/paste/undo/redo paths, so
         # QUndoStack index changes give us one framework-level hook without
-        # coupling plugin specific policy into the scene or individual commands.
+        # coupling plugin policy into the scene or individual commands.
         self.undo_stack.indexChanged.connect(self._on_graph_content_command_index_changed)
 
         self.selected_node_item = None
@@ -143,7 +143,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         """Register framework-owned authoring commands only.
 
         Domain tools may add their own command maps, but nexus-core commands
-        must remain generic and must not reference other plugin concepts.
+        must remain generic and must not reference plugin specific concepts.
         """
         descriptors = [
             GraphCommandDescriptor('graph.align.left', 'Align Left', 'Layout', 'Ctrl+Alt+Left', 'Align selected nodes to the left edge.', lambda: self.align_selected_nodes('left')),
@@ -268,6 +268,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
 
         self._viewHeaderLabel = QtWidgets.QLabel(self.graph_view_label, self._viewHeaderFrame)
         self._viewHeaderLabel.setObjectName("nodeViewHeaderLabel")
+        self._viewHeaderLabel.hide()
 
         self._viewHeaderNameBadge = QtWidgets.QLabel("Not Selected", self._viewHeaderFrame)
         self._viewHeaderNameBadge.setObjectName("nodeViewHeaderNameBadge")
@@ -276,6 +277,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._viewHeaderStateBadge = QtWidgets.QLabel("Select a view to begin", self._viewHeaderFrame)
         self._viewHeaderStateBadge.setObjectName("nodeViewHeaderStateBadge")
         self._viewHeaderStateBadge.setAlignment(QtCore.Qt.AlignCenter)
+        self._viewHeaderStateBadge.hide()
 
         self._viewHeaderTypeLabel = QtWidgets.QLabel("Graph Type", self._viewHeaderFrame)
         self._viewHeaderTypeLabel.setObjectName("nodeViewHeaderTypeLabel")
@@ -288,6 +290,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._viewHeaderDescriptionLabel.setObjectName("nodeViewHeaderDescriptionLabel")
         self._viewHeaderDescriptionLabel.setWordWrap(True)
         self._viewHeaderDescriptionLabel.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self._viewHeaderDescriptionLabel.hide()
 
         self._reframeButton = QtWidgets.QPushButton("Reframe", self._viewHeaderFrame)
         self._reframeButton.setObjectName("nodeReframeButton")
@@ -315,23 +318,34 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._subgraphBackButton.clicked.connect(self.close_current_subgraph)
         self._subgraphBackButton.hide()
 
-        self._subgraphPathLabel = QtWidgets.QLabel("", self._viewHeaderFrame)
-        self._subgraphPathLabel.setObjectName("nodeSubgraphPathLabel")
-        self._subgraphPathLabel.setAlignment(QtCore.Qt.AlignCenter)
-        self._subgraphPathLabel.hide()
+        self._subgraphBreadcrumbFrame = QtWidgets.QFrame(self._viewHeaderFrame)
+        self._subgraphBreadcrumbFrame.setObjectName("nodeSubgraphBreadcrumbFrame")
+        self._subgraphBreadcrumbFrame.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Preferred)
+        self._subgraphBreadcrumbLayout = QtWidgets.QHBoxLayout(self._subgraphBreadcrumbFrame)
+        self._subgraphBreadcrumbLayout.setContentsMargins(0, 0, 0, 0)
+        self._subgraphBreadcrumbLayout.setSpacing(4)
+        self._subgraphBreadcrumbFrame.hide()
 
-        header_layout.addWidget(self._viewHeaderLabel, 0)
+        # Backward-compatible attribute name for older helper code/tests that
+        # still check for the former path label.  The breadcrumb frame is now
+        # the visible navigation control.
+        self._subgraphPathLabel = self._subgraphBreadcrumbFrame
+
+        # Compact graph header: keep active view and breadcrumb context visible,
+        # but do not spend horizontal space on persistent status/help text.
         header_layout.addWidget(self._viewHeaderNameBadge, 0)
-        header_layout.addWidget(self._viewHeaderStateBadge, 0)
         header_layout.addWidget(self._viewHeaderTypeLabel, 0)
         header_layout.addWidget(self._viewHeaderTypeCombo, 0)
-        header_layout.addWidget(self._viewHeaderDescriptionLabel, 1)
+        header_layout.addWidget(self._subgraphBreadcrumbFrame, 0)
+        header_layout.addStretch(1)
         header_layout.addWidget(self._reframeButton, 0)
         header_layout.addWidget(self._addBookmarkButton, 0)
         header_layout.addWidget(self._bookmarksButton, 0)
         header_layout.addWidget(self._validationButton, 0)
-        header_layout.addWidget(self._subgraphPathLabel, 0)
-        header_layout.addWidget(self._subgraphBackButton, 0)
+
+        self._parentScopeShortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Alt+Up"), self._editorSurface)
+        self._parentScopeShortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+        self._parentScopeShortcut.activated.connect(self.close_current_subgraph)
         editor_layout.addWidget(self._viewHeaderFrame, 0)
         editor_layout.addWidget(self.graphView, 1)
 
@@ -926,10 +940,101 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._initial_fit_pending = True
         QtCore.QTimer.singleShot(0, self._ensure_initial_fit)
 
+    def _inline_container_chain_for_node(self, node_item):
+        """Return outermost-to-target node items for a node opened from inline projection."""
+        chain = []
+        cur = node_item
+        seen = set()
+        expansions = getattr(self, '_inline_subgraph_expansions', {}) or {}
+        while cur is not None:
+            key = id(cur)
+            if key in seen:
+                break
+            seen.add(key)
+            chain.insert(0, cur)
+            parent_id = getattr(cur, '_inline_subgraph_parent_id', None)
+            if not parent_id:
+                break
+            parent_expansion = expansions.get(parent_id) or {}
+            cur = parent_expansion.get('container_node')
+        return chain
+
+    def _model_id_for_inline_chain_node(self, node_item):
+        """Return the persisted node id for a live/inline projected node."""
+        original = getattr(node_item, '_inline_original_node_id', None)
+        if original:
+            return original
+        try:
+            props = getattr(getattr(node_item, 'node_data', None), 'properties', {}) or {}
+            original = props.get('__inline_original_node_id') if isinstance(props, dict) else None
+            if original:
+                return original
+        except Exception:
+            pass
+        try:
+            return node_item.node_data.node_id
+        except Exception:
+            return None
+
+    def _open_inline_projected_subgraph_for_node(self, node_item):
+        """Open a subgraph from an inline-expanded projection while preserving breadcrumb ancestry.
+
+        Directly opening a node that is currently shown inside an inline-expanded
+        subgraph used to save/collapse the parent graph and then open the target
+        as if it lived on the main canvas.  Build the true container chain first,
+        sync/collapse the inline projections into the model, then walk that model
+        chain to create one breadcrumb context per ancestor before loading the
+        requested child graph.
+        """
+        chain_items = self._inline_container_chain_for_node(node_item)
+        if len(chain_items) < 2:
+            return False
+        chain_ids = [self._model_id_for_inline_chain_node(item) for item in chain_items]
+        if not chain_ids[-1]:
+            return False
+
+        root_graph = self._save_current_graph_context()
+        self._graph_context_stack = []
+        current_graph = root_graph
+        parent_view_id = (current_graph.get('metadata') or {}).get('active_node_view_id') if isinstance(current_graph, dict) else self._active_node_view_id
+        label = None
+
+        for depth, model_id in enumerate(chain_ids):
+            if not model_id or not isinstance(current_graph, dict):
+                return False
+            node_props = self._find_node_properties_in_graph(current_graph, model_id)
+            if node_props is None:
+                return False
+            live_item = chain_items[depth]
+            graph_name = node_props.get('graph_name') or getattr(getattr(live_item, 'node_data', None), 'title', None) or getattr(live_item, 'title', None) or 'Sub-Graph'
+            subgraph = node_props.get('subgraph')
+            if not isinstance(subgraph, dict) or not subgraph.get('nodes'):
+                node_type = getattr(getattr(live_item, 'node_data', None), 'node_type', None)
+                subgraph = self._default_subgraph_data(graph_name, node_type)
+                node_props['subgraph'] = subgraph
+            context = {
+                'node_id': model_id,
+                'title': getattr(getattr(live_item, 'node_data', None), 'title', None) or getattr(live_item, 'title', None) or graph_name,
+                'node_properties': node_props,
+                'parent_view_id': parent_view_id,
+            }
+            self._graph_context_stack.append(context)
+            label = graph_name
+            if depth == len(chain_ids) - 1:
+                self._load_graph_context(subgraph)
+                self._status_message('Opened sub-graph: %s' % label, 3500)
+                return True
+            current_graph = subgraph
+            parent_view_id = (current_graph.get('metadata') or {}).get('active_node_view_id') if isinstance(current_graph, dict) else parent_view_id
+        return False
+
     def open_subgraph_for_node(self, node_item):
         if not self.is_subgraph_container_node(node_item):
             self.open_properties_for_node(node_item)
             return False
+        if getattr(node_item, '_inline_subgraph_parent_id', None):
+            if self._open_inline_projected_subgraph_for_node(node_item):
+                return True
 
         # Capture the current parent graph first so edits made before opening
         # the child are not lost. Then resolve the selected node's active
@@ -995,14 +1100,124 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._status_message("Returned to parent graph", 2500)
         return True
 
+    def _root_graph_breadcrumb_label(self):
+        if self.current_file_path:
+            try:
+                name = Path(self.current_file_path).stem
+                if name:
+                    return name
+            except Exception:
+                pass
+        title = self.editor_title() if callable(getattr(self, 'editor_title', None)) else getattr(self, '_editor_title', '')
+        title = str(title or '').strip()
+        return title or "Main Graph"
+
+    def _subgraph_context_label(self, context):
+        props = context.get("node_properties") or {}
+        metadata = props.get("subgraph", {}).get("metadata", {}) if isinstance(props.get("subgraph"), dict) else {}
+        return str(
+            props.get("graph_name")
+            or (metadata.get("graph_name") if isinstance(metadata, dict) else None)
+            or context.get("title")
+            or "Sub-Graph"
+        )
+
+    def _breadcrumb_entries(self):
+        entries = [(self._root_graph_breadcrumb_label(), -1)]
+        for index, context in enumerate(getattr(self, '_graph_context_stack', []) or []):
+            entries.append((self._subgraph_context_label(context), index))
+        return entries
+
     def _current_subgraph_path(self):
         if not self._graph_context_stack:
             return ""
-        labels = []
-        for context in self._graph_context_stack:
-            props = context.get("node_properties") or {}
-            labels.append(str(props.get("graph_name") or context.get("title") or "Sub-Graph"))
-        return " / ".join(labels)
+        return " > ".join(label for label, _index in self._breadcrumb_entries())
+
+    def _clear_subgraph_breadcrumb(self):
+        layout = getattr(self, '_subgraphBreadcrumbLayout', None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _refresh_subgraph_breadcrumb(self):
+        frame = getattr(self, '_subgraphBreadcrumbFrame', None)
+        layout = getattr(self, '_subgraphBreadcrumbLayout', None)
+        if frame is None or layout is None:
+            return
+        in_subgraph = bool(getattr(self, '_graph_context_stack', []))
+        frame.setVisible(in_subgraph)
+        self._clear_subgraph_breadcrumb()
+        if not in_subgraph:
+            return
+
+        current_scope_index = len(self._graph_context_stack) - 1
+        for position, (label, scope_index) in enumerate(self._breadcrumb_entries()):
+            if position:
+                sep = QtWidgets.QLabel(">", frame)
+                sep.setObjectName("nodeSubgraphBreadcrumbSeparator")
+                layout.addWidget(sep, 0)
+            button = QtWidgets.QToolButton(frame)
+            button.setObjectName("nodeSubgraphBreadcrumbButton")
+            button.setText(label)
+            button.setAutoRaise(True)
+            button.setCursor(QtCore.Qt.PointingHandCursor)
+            button.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+            is_current = scope_index == current_scope_index
+            button.setEnabled(not is_current)
+            button.setProperty("currentScope", "true" if is_current else "false")
+            button.setToolTip("Current graph scope" if is_current else f"Switch to {label}")
+            button.clicked.connect(lambda _checked=False, idx=scope_index: self.navigate_to_graph_scope(idx))
+            layout.addWidget(button, 0)
+        frame.setToolTip(self._current_subgraph_path())
+        self._apply_view_header_styles()
+
+    def _graph_payload_for_breadcrumb_scope(self, scope_index):
+        if scope_index < 0:
+            return self._root_graph_data or {"nodes": [], "connections": []}
+        if scope_index >= len(self._graph_context_stack):
+            return None
+        context = self._graph_context_stack[scope_index]
+        if context.get("reference_only"):
+            path = context.get("linked_graph_path") or context.get("current_file_path")
+            if path:
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception as exc:
+                    QtWidgets.QMessageBox.warning(self, "Open Linked Graph", f"Could not reload linked graph:\n{exc}")
+                    return None
+            return {"nodes": [], "connections": []}
+        props = context.get("node_properties") or {}
+        return props.get("subgraph") if isinstance(props.get("subgraph"), dict) else {"nodes": [], "connections": []}
+
+    def navigate_to_graph_scope(self, scope_index):
+        if not getattr(self, '_graph_context_stack', []):
+            return False
+        try:
+            scope_index = int(scope_index)
+        except Exception:
+            return False
+        if scope_index >= len(self._graph_context_stack):
+            return False
+
+        self._save_current_graph_context()
+        target_graph = self._graph_payload_for_breadcrumb_scope(scope_index)
+        if not isinstance(target_graph, dict):
+            return False
+
+        if scope_index < 0:
+            self._graph_context_stack = []
+            label = self._root_graph_breadcrumb_label()
+        else:
+            self._graph_context_stack = self._graph_context_stack[:scope_index + 1]
+            label = self._subgraph_context_label(self._graph_context_stack[-1])
+        self._load_graph_context(target_graph)
+        self._status_message(f"Switched to graph scope: {label}", 2500)
+        return True
 
     def _new_node_id(self, old_id, remap):
         if old_id not in remap:
@@ -1051,6 +1266,15 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     props['__inline_subgraph_parent'] = container_id
                 if original_node_id:
                     props['__inline_original_node_id'] = original_node_id
+            # Preserve the child graph's zone metadata while this node is
+            # projected into the parent scene.  A __zone_id on an inline node
+            # belongs to the nested graph, not to the parent graph's zones.
+            # Older code removed this property to prevent parent-zone adoption,
+            # but that destroyed the child graph's zone membership on collapse
+            # and caused nodes to reopen on the subgraph's main canvas.
+            if isinstance(props, dict) and props.get('__zone_id'):
+                item._inline_zone_id = props.get('__zone_id')
+            item._zone_id = None
             item._inline_subgraph_display = True
             item._inline_subgraph_parent_id = container_id
             item._inline_original_node_id = original_node_id
@@ -1133,6 +1357,8 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             try:
                 for item in list(self.scene.items()):
                     if isinstance(item, NodeItem) and not getattr(item, '_inline_boundary_interface', False) and getattr(item, '_inline_subgraph_parent_id', None) == container_id:
+                        if self._is_hidden_expanded_container_proxy(item):
+                            continue
                         nodes.append(item)
             except RuntimeError:
                 return False
@@ -1171,15 +1397,148 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self._suspend_inline_bounds_refresh = previous_bounds_suspend
         return moved
 
+
+    def _is_hidden_expanded_container_proxy(self, item):
+        """Return True when an inline child node has been replaced by its own expansion.
+
+        Expanded sub-container nodes remain in the scene as hidden model anchors,
+        but their dashed InlineSubgraphBoundaryItem is the visible geometry that
+        should drive layout. Counting the hidden node as well as the boundary makes
+        parent child-zones span from the old node position to the expanded region,
+        producing the very wide/empty nested layouts seen on second-level expands.
+        """
+        try:
+            node_id = getattr(getattr(item, 'node_data', None), 'node_id', None)
+            if not node_id:
+                return False
+            if node_id not in (getattr(self, '_inline_subgraph_expansions', {}) or {}):
+                return False
+            if bool(getattr(item, '_inline_boundary_interface', False)):
+                return False
+            return not bool(item.isVisible())
+        except RuntimeError:
+            return False
+        except Exception:
+            return False
+
+
+    def _inline_expansion_parent_id(self, container_id):
+        expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id) or {}
+        container = expansion.get('container_node')
+        return getattr(container, '_inline_subgraph_parent_id', None) if container is not None else None
+
+    def _inline_expansion_depth(self, container_id):
+        expansions = getattr(self, '_inline_subgraph_expansions', {}) or {}
+        depth = 0
+        cur = container_id
+        seen = set()
+        for _ in range(64):
+            if cur in seen:
+                break
+            seen.add(cur)
+            parent = self._inline_expansion_parent_id(cur)
+            if not parent or parent not in expansions:
+                break
+            depth += 1
+            cur = parent
+        return depth
+
+    def _refresh_inline_layout_tree(self):
+        self._normalize_all_inline_boundary_rect_items()
+        """Run one bottom-up scoped layout transaction for all inline expansions.
+
+        Nested expanded subgraphs must be measured from the deepest child first,
+        then each containing child-zone and expanded boundary can compact around
+        the final visible geometry.  This prevents second-level expansions from
+        being sized from stale hidden proxy nodes or partially shifted sibling
+        boundaries.
+        """
+        if bool(getattr(self, '_inline_layout_tree_refresh_active', False)):
+            return False
+        expansions = getattr(self, '_inline_subgraph_expansions', {}) or {}
+        if not expansions:
+            return False
+        changed = False
+        self._inline_layout_tree_refresh_active = True
+        previous_cascade = bool(getattr(self, '_inline_bounds_cascade_active', False))
+        previous_active = bool(getattr(self, '_inline_bounds_refresh_active', False))
+        try:
+            self._inline_bounds_cascade_active = True
+            # Two passes allow a parent that shrank/grew on pass one to give its
+            # own parent an accurate rectangle on pass two without iterative churn.
+            for _pass in range(2):
+                ordered = sorted(list(expansions.keys()), key=lambda cid: self._inline_expansion_depth(cid), reverse=True)
+                for cid in ordered:
+                    if cid not in expansions:
+                        continue
+                    try:
+                        changed = bool(self._refresh_inline_zone_boundaries(cid)) or changed
+                        self._inline_bounds_refresh_active = True
+                        changed = bool(self._refresh_inline_expansion_bounds_impl(cid)) or changed
+                    finally:
+                        self._inline_bounds_refresh_active = previous_active
+            # Once inline scopes are stable, compact top-level zones from only
+            # their own top-level contents.
+            changed = bool(self.refresh_all_zone_bounds()) or changed
+        finally:
+            self._inline_bounds_cascade_active = previous_cascade
+            self._inline_bounds_refresh_active = previous_active
+            self._inline_layout_tree_refresh_active = False
+        return changed
+
     def _refresh_inline_expansion_bounds(self, container_id):
-        """Grow/recompute the dashed boundary around all child-scope nodes."""
+        """Grow/recompute the dashed boundary around all child-scope nodes.
+
+        Nested inline expansions form a layout ancestry chain.  Refreshing only
+        the boundary that changed leaves parent inline boundaries and parent
+        child-zone frames stale, which is what made deeply nested expansions
+        break out of their containing zone/container.  The public wrapper now
+        refreshes the requested expansion first, then walks upward through the
+        inline ancestry and recomputes each containing child-zone and boundary.
+        """
         if bool(getattr(self, '_inline_bounds_refresh_active', False)):
             return False
+        changed = False
         self._inline_bounds_refresh_active = True
         try:
-            return self._refresh_inline_expansion_bounds_impl(container_id)
+            changed = bool(self._refresh_inline_expansion_bounds_impl(container_id))
         finally:
             self._inline_bounds_refresh_active = False
+
+        if not bool(getattr(self, '_inline_bounds_cascade_active', False)) and not bool(getattr(self, '_inline_layout_tree_refresh_active', False)):
+            changed = bool(self._refresh_inline_layout_tree()) or changed
+        return changed
+
+    def _refresh_inline_expansion_ancestor_chain(self, container_id):
+        """Refresh all parent inline scopes and top-level zones for a child expansion."""
+        expansions = getattr(self, '_inline_subgraph_expansions', {}) or {}
+        current_id = container_id
+        changed = False
+        seen = set()
+        for _depth in range(32):
+            expansion = expansions.get(current_id)
+            if not isinstance(expansion, dict) or current_id in seen:
+                break
+            seen.add(current_id)
+            container = expansion.get('container_node')
+            parent_id = getattr(container, '_inline_subgraph_parent_id', None) if container is not None else None
+            # If this inline expansion is itself represented by a container node
+            # inside a top-level zone, that zone must compact around the expanded
+            # boundary.  Child-zone visuals are handled by the parent inline scope.
+            top_zone = getattr(container, '_zone_id', None) if container is not None else None
+            if top_zone and not parent_id:
+                changed = bool(self._refresh_zone_bounds(str(top_zone))) or changed
+            if not parent_id:
+                break
+            changed = bool(self._refresh_inline_zone_boundaries(parent_id)) or changed
+            previous_active = bool(getattr(self, '_inline_bounds_refresh_active', False))
+            self._inline_bounds_refresh_active = True
+            try:
+                changed = bool(self._refresh_inline_expansion_bounds_impl(parent_id)) or changed
+            finally:
+                self._inline_bounds_refresh_active = previous_active
+            current_id = parent_id
+        return changed
 
     def _refresh_inline_expansion_bounds_impl(self, container_id):
         """Implementation for inline boundary recomputation; guarded by caller.
@@ -1200,21 +1559,62 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         tracked = []
         for node in list(expansion.get('nodes', []) or []):
             if node is not None and getattr(node, 'scene', lambda: None)() is self.scene:
+                if self._is_hidden_expanded_container_proxy(node):
+                    continue
                 tracked.append(node)
         try:
             for item in list(self.scene.items()):
                 if isinstance(item, NodeItem) and item.scene() is self.scene and not getattr(item, '_inline_boundary_interface', False) and getattr(item, '_inline_subgraph_parent_id', None) == container_id and item not in tracked:
+                    if self._is_hidden_expanded_container_proxy(item):
+                        continue
                     tracked.append(item)
         except RuntimeError:
             pass
-        expansion['nodes'] = tracked
+        # Keep expansion['nodes'] as the full removable projection set.
+        # Layout uses the filtered tracked list, but collapse still needs hidden
+        # expanded container proxies so it can cleanly remove/rebuild them.
 
         for item in tracked:
             try:
-                rect = item.sceneBoundingRect()
+                rect = self._layout_rect_for_item(item)
                 node_rect = rect if node_rect.isNull() else node_rect.united(rect)
             except RuntimeError:
                 continue
+
+        # Nested inline expansions visually replace their container node.  When a
+        # sub-container is expanded inside this inline scope, include the nested
+        # dashed boundary in this parent scope's fit rectangle instead of only
+        # the now-hidden container node.  This lets any number of nested expanded
+        # sub-containers grow the outer scopes dynamically.
+        for nested_id, nested in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+            if nested_id == container_id or not isinstance(nested, dict):
+                continue
+            nested_container = nested.get('container_node')
+            if getattr(nested_container, '_inline_subgraph_parent_id', None) != container_id:
+                continue
+            nested_boundary = nested.get('boundary')
+            if nested_boundary is None:
+                continue
+            try:
+                rect = self._layout_rect_for_item(nested_boundary)
+                if rect.isValid() and not rect.isNull():
+                    node_rect = rect if node_rect.isNull() else node_rect.united(rect)
+            except RuntimeError:
+                continue
+
+        # Keep child-zone frames compact and include them in the expanded
+        # subgraph's own fit rectangle.  This prevents the inline subgraph frame
+        # from overlapping its internal zones while also avoiding blank-space
+        # growth inherited from stale main-graph zone bounds.
+        self._refresh_inline_zone_boundaries(container_id)
+        for zitem in list(expansion.get('inline_zone_boundaries', []) or []):
+            try:
+                zrect = self._layout_rect_for_item(zitem)
+                if zrect.isValid() and not zrect.isNull():
+                    node_rect = zrect if node_rect.isNull() else node_rect.united(zrect)
+            except RuntimeError:
+                continue
+
         if node_rect.isNull():
             return False
 
@@ -1237,14 +1637,15 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             node_rect = QtCore.QRectF()
             clean_tracked = []
             for item in list(tracked):
+                if self._is_hidden_expanded_container_proxy(item):
+                    continue
                 try:
-                    rect = item.sceneBoundingRect()
+                    rect = self._layout_rect_for_item(item)
                     node_rect = rect if node_rect.isNull() else node_rect.united(rect)
                     clean_tracked.append(item)
                 except RuntimeError:
                     continue
             tracked = clean_tracked
-            expansion['nodes'] = tracked
             if not node_rect.isNull():
                 required_rect = node_rect.adjusted(-45 - left_gutter_extra, -72, 55 + right_gutter_extra, 55)
 
@@ -1288,6 +1689,22 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 boundary._rect = QtCore.QRectF(new_rect)
                 boundary.update()
 
+            # Expanded inline sub-containers are sibling layout regions in the
+            # parent scene.  They should never visually overlap graph zones that
+            # they do not belong to.  Resolve any overlap by moving the entire
+            # expanded group vertically before we refresh ports/wires and before
+            # zone sizing sees child nodes crossing a foreign zone boundary.
+            container_node = expansion.get('container_node')
+            parent_scope = getattr(container_node, '_inline_subgraph_parent_id', None)
+            adjusted_for_zones = False
+            if not parent_scope:
+                adjusted_for_zones = self._avoid_zone_overlap_for_inline_expansion(container_id)
+            if adjusted_for_zones:
+                try:
+                    new_rect = self._layout_rect_for_item(boundary)
+                except RuntimeError:
+                    pass
+
             self._position_inline_boundary_interface_nodes(container_id)
             for citem in list(expansion.get("connections", []) or []):
                 try:
@@ -1295,11 +1712,26 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     citem.sync_pin_items()
                 except RuntimeError:
                     continue
-            self._push_parent_nodes_away_from_inline_bounds(container_id, old_rect, QtCore.QRectF(new_rect))
-            self._compact_previously_pushed_parent_nodes_toward_inline_bounds(container_id, old_rect, QtCore.QRectF(new_rect))
-            self._enforce_parent_nodes_outside_inline_bounds(container_id)
+            # Parent-node push is a top-level collision resolver.  Do not run it
+            # for nested inline scopes: nested scopes are laid out by the
+            # bottom-up group compactor.  Pushing siblings away from a nested
+            # child boundary is what preserved huge empty lanes after the second
+            # expansion.
+            if not parent_scope:
+                self._push_parent_nodes_away_from_inline_bounds(container_id, old_rect, QtCore.QRectF(new_rect))
+                self._compact_previously_pushed_parent_nodes_toward_inline_bounds(container_id, old_rect, QtCore.QRectF(new_rect))
+                self._enforce_parent_nodes_outside_inline_bounds(container_id)
+            zone_id = getattr(container_node, '_zone_id', None)
+            if zone_id and not bool(getattr(self, '_suspend_zone_layout', False)) and not parent_scope:
+                self._refresh_zone_bounds(zone_id)
+            if parent_scope and parent_scope != container_id:
+                # The public wrapper performs a guarded ancestor cascade after
+                # this refresh completes.  Calling the wrapper from inside the
+                # active refresh guard is a no-op and was leaving parent inline
+                # zones/boundaries stale for nested sub-container expansions.
+                self._refresh_inline_zone_boundaries(parent_scope)
             if hasattr(self.scene, 'ensure_logical_scene_rect'):
-                self.scene.ensure_logical_scene_rect(boundary.sceneBoundingRect())
+                self.scene.ensure_logical_scene_rect(self._layout_rect_for_item(boundary))
         except RuntimeError:
             return False
         return True
@@ -1350,6 +1782,16 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 if item is hidden_container:
                     continue
                 if getattr(item, '_inline_subgraph_display', False):
+                    continue
+                # Inline expansion reflow must not push nodes that belong to
+                # graph zones.  A zone is a scoped layout island: when an
+                # expanded sub-container inside one zone grows/collapses, nodes
+                # in other zones must keep their relative positions.  Moving
+                # those nodes independently makes their owning zone later
+                # resize/stretch around the displaced content.  Zone/zone
+                # conflicts are resolved by moving whole zone regions, not by
+                # moving their child nodes from an inline-boundary pass.
+                if self._node_zone_id(item, restore=True):
                     continue
                 try:
                     if not item.isVisible():
@@ -1457,6 +1899,12 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     continue
                 if getattr(item, '_inline_subgraph_display', False):
                     continue
+                # Do not let zone-owned nodes block/drive inline compaction in
+                # another layout scope.  Otherwise collapsing an inline
+                # sub-container can use nodes from later zones as corridor
+                # obstacles, leaving the graph in a stretched/incorrect state.
+                if self._node_zone_id(item, restore=True):
+                    continue
                 try:
                     if not item.isVisible():
                         continue
@@ -1481,6 +1929,10 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     seen.add(key)
                     if node is None or not node.isVisible() or getattr(node, '_inline_subgraph_display', False):
                         continue
+                    # Only compact true parent-scope neighbors. Zone-owned
+                    # neighbors are managed by their zone boundary as a group.
+                    if self._node_zone_id(node, restore=True):
+                        continue
                     node_rect = QtCore.QRectF(node.sceneBoundingRect())
                 except RuntimeError:
                     continue
@@ -1502,6 +1954,91 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self.scene._suspend_undo = previous_undo_suspend
             self._suspend_inline_parent_push = previous_push_suspend
         return moved
+
+    def _avoid_zone_overlap_for_inline_expansion(self, container_id):
+        """Move an expanded inline sub-container above/below foreign zones.
+
+        Zone ownership is explicit.  If a sub-container from the parent graph is
+        expanded near a zone, the expanded dashed editing surface must reflow as
+        a sibling region instead of overlapping the zone.  Otherwise child nodes
+        from the expanded subgraph can visually sit inside the zone and make the
+        zone resize around content it does not own.
+        """
+        if bool(getattr(self, '_suspend_inline_zone_avoidance', False)):
+            return False
+        expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id)
+        if not isinstance(expansion, dict):
+            return False
+        boundary = expansion.get('boundary')
+        container = expansion.get('container_node')
+        if boundary is None:
+            return False
+        try:
+            boundary_rect = QtCore.QRectF(boundary.sceneBoundingRect())
+        except RuntimeError:
+            return False
+        if boundary_rect.isNull() or not boundary_rect.isValid():
+            return False
+
+        # If this expansion lives inside another inline-expanded subgraph,
+        # keep it in that child graph's layout scope.  The parent inline
+        # boundary and its child zone boundaries must grow around it; moving the
+        # nested expansion up/down to avoid top-level graph zones makes it break
+        # out of the parent scope and leaves long/broken projection wires.
+        if getattr(container, '_inline_subgraph_parent_id', None):
+            return False
+
+        owning_zone_id = str(getattr(container, '_zone_id', '') or '')
+        zone_boundaries = getattr(self, '_zone_boundaries', {}) or {}
+        if not zone_boundaries:
+            return False
+
+        margin = 36.0
+        total_dy = 0.0
+        # Bound the loop so a dense layout cannot spin forever.  Each pass
+        # resolves the current worst overlap against all foreign zones.
+        for _pass in range(max(1, min(8, len(zone_boundaries) + 3))):
+            hit = None
+            current = QtCore.QRectF(boundary_rect).translated(0.0, total_dy)
+            for zid, zone_boundary in list(zone_boundaries.items()):
+                if owning_zone_id and str(zid) == owning_zone_id:
+                    continue
+                try:
+                    zrect = QtCore.QRectF(zone_boundary.sceneBoundingRect()).adjusted(-10.0, -8.0, 10.0, 8.0)
+                except RuntimeError:
+                    continue
+                if zrect.isNull() or not zrect.isValid() or not current.intersects(zrect):
+                    continue
+                overlap_top_shift = (zrect.top() - margin) - current.bottom()
+                overlap_bottom_shift = (zrect.bottom() + margin) - current.top()
+
+                # Prefer the closest vertical escape.  On a tie, keep the expanded
+                # group near its original vertical lane by moving upward when its
+                # center is above the zone center, otherwise downward.
+                if abs(overlap_top_shift) < abs(overlap_bottom_shift):
+                    dy = overlap_top_shift
+                elif abs(overlap_bottom_shift) < abs(overlap_top_shift):
+                    dy = overlap_bottom_shift
+                else:
+                    dy = overlap_top_shift if current.center().y() <= zrect.center().y() else overlap_bottom_shift
+                if abs(dy) > 0.5:
+                    hit = dy
+                    break
+            if hit is None:
+                break
+            total_dy += hit
+        if abs(total_dy) < 0.5:
+            return False
+
+        state = self._capture_inline_expansion_group_state(container_id)
+        if not state:
+            return False
+        previous = bool(getattr(self, '_suspend_inline_zone_avoidance', False))
+        self._suspend_inline_zone_avoidance = True
+        try:
+            return self._apply_inline_expansion_group_drag_state(container_id, state, QtCore.QPointF(0.0, total_dy))
+        finally:
+            self._suspend_inline_zone_avoidance = previous
 
     def _enforce_parent_nodes_outside_inline_bounds(self, container_id=None, moved_node=None):
         """Keep parent-scope nodes out of editable inline child boundaries.
@@ -1599,6 +2136,27 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
 
     def _handle_inline_node_position_changed(self, node_item):
         """Keep the inline boundary synchronized while users drag child nodes."""
+        # While a user is actively dragging an inline child node, do not run the
+        # scoped layout transaction. That transaction is allowed to compact,
+        # align, and resize ancestor zones, which is desirable after explicit
+        # expand/collapse operations but creates apparent viewport jumps and can
+        # pull the node back out of the user's drag path. The node drag handler
+        # performs a final manual-scope refresh on release.
+        if getattr(node_item, '_interactive_drag_active', False):
+            # During the drag, keep the visual child zone and ancestor inline
+            # boundary following the node without running the lane compactor.
+            # This makes zones expand live as a node is pulled outward, while
+            # preserving the user's in-progress cursor-relative move.
+            if not bool(getattr(self, '_inline_live_drag_refresh_active', False)):
+                previous_live = bool(getattr(self, '_inline_live_drag_refresh_active', False))
+                try:
+                    self._inline_live_drag_refresh_active = True
+                    self.refresh_inline_after_manual_node_drag(container_id)
+                except Exception:
+                    pass
+                finally:
+                    self._inline_live_drag_refresh_active = previous_live
+            return False
         # Boundary-interface proxy nodes are positioned by the boundary layout
         # pass itself. Treating those proxy moves as child-node edits creates a
         # recursive layout loop: resize -> position proxy -> itemChange -> resize.
@@ -1676,6 +2234,41 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 return zone
         return None
 
+    def _node_zone_id(self, item, *, restore=False, include_inline=False):
+        """Return a node's top-level zone id without crossing graph scopes.
+
+        Inline-expanded child nodes may carry a persisted __zone_id for their
+        *child* graph.  That value must not be interpreted as membership in the
+        parent graph.  For normal parent-scope nodes, treat __zone_id as the
+        authoritative persisted value and optionally repair the transient
+        _zone_id attribute.
+        """
+        if item is None:
+            return None
+        if (getattr(item, '_inline_subgraph_display', False) or getattr(item, '_inline_subgraph_parent_id', None)) and not include_inline:
+            return None
+        zone_id = getattr(item, '_zone_id', None)
+        if not zone_id:
+            try:
+                props = getattr(getattr(item, 'node_data', None), 'properties', {}) or {}
+                zone_id = props.get('__zone_id') if isinstance(props, dict) else None
+                if zone_id and restore and not (getattr(item, '_inline_subgraph_display', False) or getattr(item, '_inline_subgraph_parent_id', None)):
+                    item._zone_id = zone_id
+            except Exception:
+                zone_id = None
+        return str(zone_id) if zone_id else None
+
+    def _inline_node_zone_id(self, item):
+        """Return the child-graph zone id for a projected inline node."""
+        if item is None:
+            return None
+        try:
+            props = getattr(getattr(item, 'node_data', None), 'properties', {}) or {}
+            zone_id = props.get('__zone_id') if isinstance(props, dict) else None
+            return str(zone_id) if zone_id else None
+        except Exception:
+            return None
+
     def _zone_registry(self, zone_id):
         zone = self._zone_definition(zone_id)
         base = NODE_REGISTRY
@@ -1696,6 +2289,67 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     pass
         return registry
 
+    def _registry_for_zone_definition(self, zone, view_definition=None):
+        """Build a node registry for a concrete zone definition.
+
+        Top-level zones and inline-projected child zones use the same include /
+        exclude rules, but they may come from different view manifests.  Keeping
+        the registry creation here prevents inline child-zone menus from falling
+        back to the expanded subgraph's full registry.
+        """
+        base = NODE_REGISTRY
+        if zone is None:
+            return self.active_node_registry()
+        try:
+            active_reg = self.active_node_registry()
+            registry = type(active_reg)(base, [], view_definition=view_definition or self.active_node_view()) if active_reg.__class__.__name__ == 'FilteredNodeDefinitionRegistry' else type(base)()
+        except Exception:
+            registry = type(base)()
+        include_types = set(getattr(zone, 'include_type_ids', []) or [])
+        exclude_types = set(getattr(zone, 'exclude_type_ids', []) or [])
+        include_categories = set(getattr(zone, 'include_categories', []) or [])
+        exclude_categories = set(getattr(zone, 'exclude_categories', []) or [])
+        for definition in list(base.all_definitions() if hasattr(base, 'all_definitions') else []):
+            type_ok = (not include_types or definition.type_id in include_types)
+            cat_ok = (not include_categories or definition.category in include_categories)
+            if type_ok and cat_ok and definition.type_id not in exclude_types and definition.category not in exclude_categories:
+                try:
+                    registry.register(definition)
+                except Exception:
+                    pass
+        return registry
+
+    def _inline_zone_definition(self, container_id, zone_id):
+        expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id) or {}
+        container = expansion.get('container_node')
+        subgraph = None
+        try:
+            props = getattr(getattr(container, 'node_data', None), 'properties', {}) or {}
+            subgraph = props.get('subgraph')
+        except Exception:
+            subgraph = None
+        for zone in self._inline_zone_definitions_for_container(container, subgraph=subgraph):
+            if str(getattr(zone, 'zone_id', '')) == str(zone_id):
+                return zone
+        return None
+
+    def _inline_zone_view_definition(self, container_id):
+        view_id = self._subgraph_view_id_for_inline_scope(container_id)
+        try:
+            return NODE_VIEW_REGISTRY.get(view_id) if view_id else None
+        except Exception:
+            return None
+
+    def _inline_zone_registry(self, container_id, zone_id):
+        zone = self._inline_zone_definition(container_id, zone_id)
+        if zone is None:
+            return self._registry_for_inline_scope(container_id)
+        return self._registry_for_zone_definition(zone, view_definition=self._inline_zone_view_definition(container_id))
+
+    def _node_type_allowed_in_inline_zone(self, node_type, container_id, zone_id):
+        return self._node_type_allowed_in_registry(node_type, registry=self._inline_zone_registry(container_id, zone_id))
+
+
     def _zone_for_scene_pos(self, scene_pos):
         for zone_id, boundary in reversed(list((getattr(self, '_zone_boundaries', {}) or {}).items())):
             try:
@@ -1705,7 +2359,42 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 continue
         return None
 
+    def _inline_zone_for_scene_pos(self, scene_pos):
+        """Return (container_id, child_zone_id) for an inline-projected zone.
+
+        Inline zones are visual-only ZoneBoundaryItems, so the normal top-level
+        zone map cannot find them.  Pick the smallest containing inline zone to
+        prefer the deepest nested child-zone when boundaries overlap.
+        """
+        matches = []
+        for container_id, expansion in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+            if not isinstance(expansion, dict):
+                continue
+            for zitem in list(expansion.get('inline_zone_boundaries', []) or []):
+                try:
+                    if zitem is None or not zitem.isVisible():
+                        continue
+                    rect = QtCore.QRectF(zitem.sceneBoundingRect())
+                    if not rect.contains(scene_pos):
+                        continue
+                    raw = str(getattr(zitem, 'zone_id', '') or '')
+                    child_zid = raw.split(':', 1)[1] if ':' in raw else raw
+                    if not child_zid:
+                        continue
+                    matches.append((rect.width() * rect.height(), container_id, child_zid))
+                except RuntimeError:
+                    continue
+                except Exception:
+                    continue
+        if not matches:
+            return (None, None)
+        matches.sort(key=lambda t: t[0])
+        return (matches[0][1], matches[0][2])
+
     def _scope_for_scene_pos(self, scene_pos):
+        inline_container, inline_zone = self._inline_zone_for_scene_pos(scene_pos)
+        if inline_container and inline_zone:
+            return ('inline_zone', (inline_container, inline_zone))
         inline = self._inline_scope_for_scene_pos(scene_pos)
         if inline:
             return ('inline', inline)
@@ -1739,6 +2428,12 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 return QtCore.QPointF(proposed_pos)
             if item is None:
                 return QtCore.QPointF(proposed_pos)
+            # Inline-expanded child nodes live in a nested graph scope. Their
+            # persisted __zone_id, when present, identifies a zone inside that
+            # child graph and must not be interpreted as membership in the
+            # parent graph's zones. Let inline layout own their constraints.
+            if getattr(item, '_inline_subgraph_display', False) or getattr(item, '_inline_subgraph_parent_id', None):
+                return QtCore.QPointF(proposed_pos)
             node_type = getattr(getattr(item, 'node_data', None), 'node_type', None)
             if node_type in ('flow.start', 'flow.end'):
                 return self._constrain_required_control_node_position(item, proposed_pos)
@@ -1749,7 +2444,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 props = getattr(getattr(item, 'node_data', None), 'properties', {}) or {}
                 zone_id = props.get('__zone_id') if isinstance(props, dict) else None
             if not zone_id:
-                return QtCore.QPointF(proposed_pos)
+                return self._constrain_parent_node_outside_zone_bounds(item, proposed_pos)
             boundary = (getattr(self, '_zone_boundaries', {}) or {}).get(str(zone_id))
             if boundary is None:
                 return QtCore.QPointF(proposed_pos)
@@ -1783,16 +2478,81 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         except Exception:
             return QtCore.QPointF(proposed_pos)
 
+
+    def _constrain_parent_node_outside_zone_bounds(self, item, proposed_pos):
+        """Prevent parent-graph nodes from being interactively dragged into zones.
+
+        Zone membership is creation-scoped. A normal parent node may overlap a
+        zone visually while other layout operations are in progress, but a direct
+        node drag should stop at the first zone boundary instead of being adopted
+        by that zone or popping through to the next ordered lane.
+        """
+        try:
+            if item is None or getattr(item, '_inline_subgraph_display', False):
+                return QtCore.QPointF(proposed_pos)
+            if bool(getattr(self, '_zone_bulk_move_active', False)) or bool(getattr(self, '_suspend_zone_layout', False)):
+                return QtCore.QPointF(proposed_pos)
+            boundaries = list((getattr(self, '_zone_boundaries', {}) or {}).values())
+            if not boundaries:
+                return QtCore.QPointF(proposed_pos)
+            local = QtCore.QRectF(item.boundingRect())
+            proposed = QtCore.QPointF(proposed_pos)
+            current_rect = QtCore.QRectF(local).translated(item.pos())
+            proposed_rect = QtCore.QRectF(local).translated(proposed)
+            if proposed_rect.isNull() or not proposed_rect.isValid():
+                return proposed
+            margin = 18.0
+            for boundary in boundaries:
+                try:
+                    zrect = QtCore.QRectF(boundary.sceneBoundingRect()).adjusted(-6.0, -4.0, 6.0, 4.0)
+                except RuntimeError:
+                    continue
+                if zrect.isNull() or not zrect.isValid() or not zrect.intersects(proposed_rect):
+                    continue
+
+                # Choose the side based primarily on where the node came from.
+                # This keeps drag behavior intuitive at all zones, not only the
+                # first one: approaching from the left stops at the left edge;
+                # approaching from the right stops at the right edge.
+                if current_rect.right() <= zrect.left() + margin:
+                    proposed.setX(zrect.left() - margin - local.right())
+                elif current_rect.left() >= zrect.right() - margin:
+                    proposed.setX(zrect.right() + margin - local.left())
+                elif current_rect.bottom() <= zrect.top() + margin:
+                    proposed.setY(zrect.top() - margin - local.bottom())
+                elif current_rect.top() >= zrect.bottom() - margin:
+                    proposed.setY(zrect.bottom() + margin - local.top())
+                else:
+                    # Already overlapping due to a resize/reflow; push to the
+                    # nearest horizontal outside edge so the next drag resolves
+                    # the overlap without assigning zone ownership.
+                    left_dx = abs((zrect.left() - margin - local.right()) - proposed.x())
+                    right_dx = abs((zrect.right() + margin - local.left()) - proposed.x())
+                    proposed.setX((zrect.left() - margin - local.right()) if left_dx <= right_dx else (zrect.right() + margin - local.left()))
+                proposed_rect = QtCore.QRectF(local).translated(proposed)
+            return proposed
+        except Exception:
+            return QtCore.QPointF(proposed_pos)
+
     def _update_zone_membership_for_node(self, item):
         if bool(getattr(self, '_suspend_zone_membership_refresh', False)):
             return False
-        if item is None or getattr(item, '_inline_subgraph_display', False) or not self._is_zone_eligible_node(item):
+        if item is None:
+            return False
+        if getattr(item, '_inline_subgraph_display', False) or getattr(item, '_inline_subgraph_parent_id', None):
+            # Inline nodes may carry __zone_id for their nested graph. Do not
+            # clear or reinterpret it while projected into the parent scene.
+            try:
+                item._zone_id = None
+            except Exception:
+                pass
+            return False
+        if not self._is_zone_eligible_node(item):
             try:
                 props = getattr(getattr(item, 'node_data', None), 'properties', {}) or {}
                 if isinstance(props, dict):
                     props.pop('__zone_id', None)
-                if item is not None:
-                    item._zone_id = None
+                item._zone_id = None
             except Exception:
                 pass
             return False
@@ -1820,17 +2580,16 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self._refresh_zone_bounds(old_zone)
             return True
 
-        center = item.sceneBoundingRect().center()
-        new_zone = self._zone_for_scene_pos(center)
-        if new_zone:
-            if isinstance(props, dict):
-                props['__zone_id'] = new_zone
-            item._zone_id = new_zone
-            constrained = self._constrain_zone_node_position(item, item.pos())
-            if constrained != item.pos():
-                item.setPos(constrained)
-            self._refresh_zone_bounds(new_zone)
-            return True
+        # Do not auto-adopt parent-graph nodes into zones during drag.  Zone
+        # membership is only assigned when a node is created from a zone-scoped
+        # context menu (or restored from persisted __zone_id metadata).  A normal
+        # parent node dragged over a zone remains a parent node and is pushed back
+        # outside by the zone-boundary enforcement pass.
+        if isinstance(props, dict):
+            props.pop('__zone_id', None)
+        item._zone_id = None
+        if not bool(getattr(self, '_suspend_zone_layout', False)):
+            self._enforce_nodes_outside_zone_bounds()
         return False
 
     def _graph_node_type_counts_for_zone(self, zone_id):
@@ -1911,29 +2670,20 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 return QtCore.QRectF()
 
     def _zone_owned_nodes(self, zone_id):
-        """Return nodes owned by a zone, repairing transient ownership drift.
+        """Return parent-graph nodes owned by a top-level zone.
 
-        During zone-boundary drags Qt can deliver node move callbacks while the
-        boundary itself is already moving.  Some nodes may have the persisted
-        __zone_id property even if their transient _zone_id attribute was not
-        restored yet.  Treat the property as authoritative and restore the
-        attribute so group zone moves keep contents locked to the boundary.
+        Projected inline-subgraph nodes are explicitly excluded even if they
+        carry __zone_id metadata, because that metadata belongs to the child
+        graph.  This prevents main graph zones from resizing around nested
+        graph content.
         """
         owned = []
         zid = str(zone_id or '')
         for item in list(self.scene.items()):
             if not isinstance(item, NodeItem):
                 continue
-            item_zone = getattr(item, '_zone_id', None)
-            if not item_zone:
-                try:
-                    props = getattr(getattr(item, 'node_data', None), 'properties', {}) or {}
-                    item_zone = props.get('__zone_id') if isinstance(props, dict) else None
-                    if item_zone:
-                        item._zone_id = item_zone
-                except Exception:
-                    item_zone = None
-            if str(item_zone or '') == zid:
+            item_zone = self._node_zone_id(item, restore=True, include_inline=False)
+            if item_zone and str(item_zone) == zid:
                 owned.append(item)
         return owned
 
@@ -1987,39 +2737,58 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         return old_rect != QtCore.QRectF(new_rect)
 
     def _normalize_zone_order_layout(self, changed_zone_id=None):
-        """Keep manifest-ordered zones from overlapping each other.
+        """Keep manifest-ordered zones compact and center-aligned.
 
-        This is intentionally x-axis only. Zones preserve their y-position and
-        size, but each later zone is shifted right as needed with its owned
-        nodes. This gives zone growth the same predictable push behavior users
-        expect from expanded containers without letting ordered lanes cross.
+        Zones are ordered layout groups.  After expansion/collapse changes their
+        size, keep the group spacing tight and align each zone's vertical center
+        to a common lane so the graph does not gradually stair-step vertically.
+        Moving a zone also moves its owned nodes, preserving zone membership.
         """
         if bool(getattr(self, '_suspend_zone_layout', False)):
             return False
         zones = self._zone_definitions_for_active_view()
         if len(zones) < 2:
             return False
-        gap = 80.0
+        gap = 36.0
         changed = False
         previous_zone_suspend = bool(getattr(self, '_suspend_zone_layout', False))
         self._suspend_zone_layout = True
         try:
             previous_right = None
+            lane_center_y = None
             for zone in zones:
                 zid = str(getattr(zone, 'zone_id', '') or '')
                 boundary = (getattr(self, '_zone_boundaries', {}) or {}).get(zid)
                 if boundary is None:
                     continue
                 rect = self._zone_visual_rect(boundary)
+                if lane_center_y is None:
+                    lane_center_y = float(rect.center().y())
+
+                dx = 0.0
                 if previous_right is not None:
-                    min_left = previous_right + gap
-                    if rect.left() < min_left:
-                        dx = min_left - rect.left()
-                        new_rect = QtCore.QRectF(rect).translated(dx, 0.0)
-                        boundary.set_rect(new_rect)
-                        self._shift_zone_contents(zid, QtCore.QPointF(dx, 0.0))
-                        rect = new_rect
-                        changed = True
+                    # Normalize spacing in both directions, not only when a
+                    # zone overlaps the previous one.  This reclaims horizontal
+                    # blank space after compaction/collapse while preserving
+                    # manifest order.
+                    target_left = previous_right + gap
+                    dx = target_left - rect.left()
+
+                dy = 0.0
+                if lane_center_y is not None:
+                    # Expansion/collapse should leave each ordered zone centered
+                    # on the same horizontal lane.  Apply this as a group move so
+                    # nodes remain inside their zone rather than being measured
+                    # as stray content on the next refresh.
+                    dy = float(lane_center_y) - float(rect.center().y())
+
+                if abs(dx) > 1.0 or abs(dy) > 1.0:
+                    delta = QtCore.QPointF(dx, dy)
+                    new_rect = QtCore.QRectF(rect).translated(delta)
+                    boundary.set_rect(new_rect)
+                    self._shift_zone_contents(zid, delta)
+                    rect = new_rect
+                    changed = True
                 previous_right = rect.right()
         finally:
             self._suspend_zone_layout = previous_zone_suspend
@@ -2112,13 +2881,15 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             except RuntimeError:
                 pass
 
-        # Commit ordered layout immediately. This must not be preview-only: later
-        # zones should keep the shifted rect after repaint/release, including
-        # empty zones.
-        self._normalize_zone_order_layout(changed_zone_id=zone_id)
-        self._enforce_nodes_outside_zone_bounds()
-        self._reflow_required_control_nodes_around_zones()
+        # During live drag, only move the selected zone and its owned nodes.
+        # Running global zone normalization/enforcement on every mouse move made
+        # the view appear to jump and could briefly detach nodes from their zone.
+        # Commit global cleanup once on release.
         if final:
+            self._normalize_zone_order_layout(changed_zone_id=zone_id)
+            self._enforce_nodes_outside_zone_bounds()
+            self._reflow_required_control_nodes_around_zones()
+            self._refresh_zone_bounds(zone_id)
             self._active_zone_drag_state = None
         return True
 
@@ -2143,6 +2914,84 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         y = min(max(pos.y(), content.top()), max(content.top(), content.bottom() - height))
         return QtCore.QPointF(x, y)
 
+    def _adjust_inline_zone_spawn_pos(self, container_id, zone_id, scene_pos, definition=None):
+        zitem = None
+        exp = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id) or {}
+        for candidate in list(exp.get('inline_zone_boundaries', []) or []):
+            try:
+                raw = str(getattr(candidate, 'zone_id', '') or '')
+                child_zid = raw.split(':', 1)[1] if ':' in raw else raw
+                if child_zid == str(zone_id):
+                    zitem = candidate
+                    break
+            except Exception:
+                continue
+        if zitem is None:
+            return QtCore.QPointF(scene_pos)
+        try:
+            rect = QtCore.QRectF(zitem.sceneBoundingRect())
+        except Exception:
+            return QtCore.QPointF(scene_pos)
+        content = rect.adjusted(42.0, 58.0, -42.0, -42.0)
+        pos = QtCore.QPointF(scene_pos)
+        width = 180.0
+        height = 100.0
+        try:
+            if definition is not None:
+                width = max(width, float(getattr(definition, 'default_width', width) or width))
+        except Exception:
+            pass
+
+        # Inline-zone node creation should be deterministic and linear.  A
+        # repeated right-click in roughly the same zone location used to create
+        # several child nodes at the same coordinates; after collapse/re-expand
+        # those persisted positions looked like stacked nodes.  Place new nodes
+        # after the right-most direct node/nested expansion in the same inline
+        # zone, while still respecting a deliberate click farther to the right.
+        rightmost = None
+        baseline_y = None
+        try:
+            contributors = []
+            for node in list(exp.get('nodes', []) or []):
+                if getattr(node, '_inline_subgraph_parent_id', None) != container_id:
+                    continue
+                if getattr(node, '_inline_boundary_interface', False):
+                    continue
+                if self._inline_node_zone_id(node) != str(zone_id):
+                    continue
+                if self._is_hidden_expanded_container_proxy(node):
+                    continue
+                if hasattr(node, 'isVisible') and not node.isVisible():
+                    continue
+                contributors.append(node)
+            for nested_id, nested in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+                if nested_id == container_id or not isinstance(nested, dict):
+                    continue
+                nested_container = nested.get('container_node')
+                if getattr(nested_container, '_inline_subgraph_parent_id', None) != container_id:
+                    continue
+                if self._inline_node_zone_id(nested_container) != str(zone_id):
+                    continue
+                nb = nested.get('boundary')
+                if nb is not None:
+                    contributors.append(nb)
+            for item in contributors:
+                br = self._layout_rect_for_item(item)
+                if br.isValid() and not br.isNull():
+                    rightmost = br.right() if rightmost is None else max(rightmost, br.right())
+                    baseline_y = br.center().y() if baseline_y is None else baseline_y
+        except Exception:
+            pass
+
+        x = min(max(pos.x(), content.left()), max(content.left(), content.right() - width))
+        if rightmost is not None:
+            x = max(x, float(rightmost) + 48.0)
+        y = pos.y()
+        if baseline_y is not None:
+            y = float(baseline_y) - height / 2.0
+        y = min(max(y, content.top()), max(content.top(), content.bottom() - height))
+        return QtCore.QPointF(x, y)
+
     def _refresh_zone_bounds(self, zone_id):
         if bool(getattr(self, '_suspend_zone_membership_refresh', False)):
             return False
@@ -2150,6 +2999,15 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         if boundary is None:
             return False
         nodes = self._zone_owned_nodes(zone_id)
+        # Keep zone contents ordered by exec flow before measuring the zone.
+        # Without this, expand/collapse compaction can preserve stale x
+        # coordinates and make wire routing look like the logical order changed.
+        try:
+            if len(nodes) > 1:
+                self._linearize_top_level_zone_nodes(zone_id)
+                nodes = self._zone_owned_nodes(zone_id)
+        except Exception:
+            pass
         try:
             old_rect = self._zone_visual_rect(boundary)
         except Exception:
@@ -2178,24 +3036,56 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         tracked = []
         for node in nodes:
             try:
+                # A zone may own the original container node for an inline-expanded
+                # subgraph.  That node stays in the scene as a hidden model proxy,
+                # but layout must use the visible InlineSubgraphBoundaryItem instead.
+                # Counting both the hidden proxy and the visible boundary is the
+                # primary cause of huge zone rectangles after nested expansion.
+                if self._is_hidden_expanded_container_proxy(node):
+                    continue
+                if getattr(node, '_inline_subgraph_display', False):
+                    continue
+                if hasattr(node, 'isVisible') and not node.isVisible():
+                    continue
                 br = QtCore.QRectF(node.sceneBoundingRect())
                 rect = br if rect.isNull() else rect.united(br)
                 tracked.append(node)
             except RuntimeError:
                 continue
+
+        # Expanded sub-containers inside zones are represented by inline dashed
+        # boundaries while their original container node is hidden.  Include those
+        # boundaries in the zone's fit rectangle so zones grow around expanded
+        # content rather than clipping or visually swallowing it.
+        for expansion in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).values()):
+            if not isinstance(expansion, dict):
+                continue
+            container = expansion.get('container_node')
+            if getattr(container, '_zone_id', None) != zone_id:
+                continue
+            # Only top-level inline expansions belong to top-level zones.
+            # Nested child expansions are measured by their inline parent zone;
+            # including them here lets child-scope geometry stretch the main zone.
+            if getattr(container, '_inline_subgraph_parent_id', None):
+                continue
+            expansion_boundary = expansion.get('boundary')
+            if expansion_boundary is None:
+                continue
+            try:
+                br = self._layout_rect_for_item(expansion_boundary)
+                if br.isValid() and not br.isNull():
+                    rect = br if rect.isNull() else rect.united(br)
+            except RuntimeError:
+                continue
+
         if rect.isNull():
             return False
 
-        # Match expanded-container behavior while preserving the manifest lane.
-        # A single first node should not collapse the zone around itself; keep
-        # the existing/default region and only expand if the node requires more
-        # space.  Once multiple nodes exist, compact more aggressively around the
-        # owned contents.
-        current_boundary_rect = self._zone_visual_rect(boundary)
-        if len(nodes) <= 1 and current_boundary_rect.isValid() and not current_boundary_rect.isNull():
-            target = QtCore.QRectF(current_boundary_rect).united(rect.adjusted(-60.0, -72.0, 60.0, 64.0))
-        else:
-            target = rect.adjusted(-60.0, -72.0, 60.0, 64.0)
+        # Keep zones compact around their owned content.  Zone regions are
+        # scoped layout islands, not grow-only lanes; after inline expand/collapse
+        # or node movement they should shrink back to a padded fit instead of
+        # retaining stale blank space that can cascade into neighboring zones.
+        target = rect.adjusted(-60.0, -72.0, 60.0, 64.0)
         min_w = 360.0
         min_h = 220.0
         if target.width() < min_w:
@@ -2203,19 +3093,10 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         if target.height() < min_h:
             cy = target.center().y(); target.setTop(cy - min_h / 2.0); target.setBottom(cy + min_h / 2.0)
 
-        # Keep zones from drifting wildly above their ordered lane on the first
-        # node; preserve at least the nominal top band unless content requires
-        # otherwise.
-        zones = self._zone_definitions_for_active_view()
-        idx = next((i for i,z in enumerate(zones) if str(getattr(z,'zone_id','')) == str(zone_id)), 0)
-        base = self._default_zone_rect(idx)
-        if target.top() > base.top():
-            # Preserve the manifest lane's title/top band by expanding upward
-            # only.  Do not translate the whole target rect upward: doing so
-            # moves the bottom edge upward as well and can leave zone-owned
-            # nodes sitting on or outside the lower boundary after a second
-            # node is added.
-            target.setTop(base.top())
+        # Fully compact on both axes.  Earlier builds anchored the top edge to
+        # the manifest lane, which made zones shrink horizontally but retain
+        # stale vertical blank space after nodes moved or inline subgraphs
+        # collapsed.
 
         tolerance = 10.0
         if old_rect.isNull() or not old_rect.isValid():
@@ -2272,7 +3153,13 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     continue
                 if getattr(item, '_inline_subgraph_display', False):
                     continue
-                if getattr(item, '_zone_id', None) == zone_id:
+                # Nodes owned by any zone must never be pushed independently by
+                # another zone's growth.  Zone-to-zone conflicts are handled by
+                # _normalize_zone_order_layout(), which moves the whole later
+                # zone and its contents as a single layout region.  Moving just
+                # a node from another zone makes that foreign zone resize/stretch
+                # when its bounds refresh after a sub-container expands/collapses.
+                if self._node_zone_id(item, restore=True):
                     continue
                 try:
                     if not item.isVisible():
@@ -2319,37 +3206,50 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self.scene._suspend_undo = True
         self._suspend_zone_layout = True
         try:
-            for zid, boundary in candidates:
-                try:
-                    zrect = QtCore.QRectF(boundary.sceneBoundingRect())
-                except RuntimeError:
-                    continue
-                if zrect.isNull() or not zrect.isValid():
-                    continue
-                reserved = QtCore.QRectF(zrect).adjusted(-8.0, -6.0, 8.0, 6.0)
-                margin = 70.0
-                for item in list(self.scene.items()):
-                    if not isinstance(item, NodeItem):
-                        continue
-                    if getattr(item, '_inline_subgraph_display', False):
-                        continue
-                    if getattr(item, '_zone_id', None) == zid:
-                        continue
+            # Iterate because pushing a node out of one zone can place it into a
+            # later zone.  Repeat a bounded number of passes so parent nodes
+            # cannot "pop" through one boundary and settle inside another.
+            for _pass in range(max(1, min(6, len(candidates) + 2))):
+                pass_moved = False
+                for zid, boundary in candidates:
                     try:
-                        if not item.isVisible():
-                            continue
-                        item_rect = QtCore.QRectF(item.sceneBoundingRect())
+                        zrect = QtCore.QRectF(boundary.sceneBoundingRect())
                     except RuntimeError:
                         continue
-                    if not reserved.intersects(item_rect):
+                    if zrect.isNull() or not zrect.isValid():
                         continue
-                    push_left = item_rect.center().x() < zrect.center().x()
-                    target_left = (zrect.left() - margin - item_rect.width()) if push_left else (zrect.right() + margin)
-                    dx = target_left - item_rect.left()
-                    if abs(dx) < 0.5:
-                        continue
-                    item.setPos(item.pos() + QtCore.QPointF(dx, 0.0))
-                    moved.append(item)
+                    reserved = QtCore.QRectF(zrect).adjusted(-8.0, -6.0, 8.0, 6.0)
+                    margin = 70.0
+                    for item in list(self.scene.items()):
+                        if not isinstance(item, NodeItem):
+                            continue
+                        if getattr(item, '_inline_subgraph_display', False):
+                            continue
+                        # Do not move nodes that already belong to any zone.
+                        # Other zones are shifted as complete regions by ordered
+                        # zone layout; moving their child nodes here causes
+                        # unintended zone resizing during inline expand/collapse.
+                        if getattr(item, '_zone_id', None):
+                            continue
+                        try:
+                            if not item.isVisible():
+                                continue
+                            item_rect = QtCore.QRectF(item.sceneBoundingRect())
+                        except RuntimeError:
+                            continue
+                        if not reserved.intersects(item_rect):
+                            continue
+                        push_left = item_rect.center().x() < zrect.center().x()
+                        target_left = (zrect.left() - margin - item_rect.width()) if push_left else (zrect.right() + margin)
+                        dx = target_left - item_rect.left()
+                        if abs(dx) < 0.5:
+                            continue
+                        item.setPos(item.pos() + QtCore.QPointF(dx, 0.0))
+                        if item not in moved:
+                            moved.append(item)
+                        pass_moved = True
+                if not pass_moved:
+                    break
         finally:
             self.scene._suspend_undo = previous_scene_suspend
             self._suspend_zone_layout = previous_zone_suspend
@@ -2383,11 +3283,11 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 if isinstance(props, dict):
                     props.pop('__zone_id', None)
                 item._zone_id = None
-                # Reflowing around zones is an x-axis boundary constraint only.
-                # Preserve the user's current vertical placement of Start/End so
-                # dragging or resizing the first zone does not cause global
-                # control anchors to drift vertically with the zone band.
-                target = QtCore.QPointF(anchor.x(), item.pos().y())
+                # Required Start/End nodes are visible graph participants in
+                # the ordered-zone lane.  Keep them horizontally outside the
+                # zone band and vertically centered on that same lane so layout
+                # operations do not leave long vertical wire drops.
+                target = QtCore.QPointF(anchor.x(), anchor.y())
                 if item.pos() != target:
                     item.setPos(target)
                     if getattr(item, 'node_data', None) is not None:
@@ -2403,7 +3303,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         if view is None:
             return False
         local = view.mapFromScene(scene_pos)
-        view._show_graph_node_palette(local, screen_pos, title='Actions for Zone: %s' % (getattr(self._zone_definition(zone_id), 'label', zone_id)), filter_fn=lambda definition: self._node_type_allowed_in_zone(getattr(definition, 'type_id', None), zone_id))
+        view._show_graph_node_palette(local, screen_pos, title='Actions for Zone: %s' % (getattr(self._zone_definition(zone_id), 'label', zone_id)), filter_fn=lambda definition: self._node_type_allowed_in_zone(getattr(definition, 'type_id', None), zone_id), registry=self._zone_registry(zone_id))
         return True
 
     def _inline_scope_for_scene_pos(self, scene_pos):
@@ -2464,10 +3364,81 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 except RuntimeError:
                     pass
 
+    def _remove_inline_scope_connection_items(self, scope_ids):
+        """Remove every live wire visual owned by one or more inline scopes.
+
+        Manual edits inside an expanded subgraph create ordinary ConnectionItem
+        objects. They are valid child-graph model edits, but they are not
+        always present in expansion["connections"]. Collapse/rebuild must
+        therefore sweep by endpoint scope, not only by recorded expansion lists,
+        otherwise orphan pink wire segments remain on the parent scene.
+        """
+        if not scope_ids:
+            return False
+        scopes = {str(s) for s in list(scope_ids or []) if s}
+        removed = False
+        try:
+            items = list(self.scene.items())
+        except RuntimeError:
+            return False
+        for conn in items:
+            try:
+                if not isinstance(conn, ConnectionItem):
+                    continue
+                source_node = getattr(getattr(conn, 'source_port', None), 'parent_node', None)
+                target_node = getattr(getattr(conn, 'target_port', None), 'parent_node', None)
+                source_scope = getattr(source_node, '_inline_subgraph_parent_id', None)
+                target_scope = getattr(target_node, '_inline_subgraph_parent_id', None)
+                conn_scope = getattr(conn, '_inline_subgraph_parent_id', None)
+                proj_scope = getattr(conn, '_projection_model_container_id', None)
+                owns = False
+                if conn_scope and str(conn_scope) in scopes:
+                    owns = True
+                if proj_scope and str(proj_scope) in scopes:
+                    owns = True
+                if source_scope and str(source_scope) in scopes:
+                    owns = True
+                if target_scope and str(target_scope) in scopes:
+                    owns = True
+                if not owns:
+                    continue
+                conn.remove_from_ports()
+                for pin in list(getattr(conn, 'pin_items', []) or []):
+                    try:
+                        self.scene.removeItem(pin)
+                    except RuntimeError:
+                        pass
+                self.scene.removeItem(conn)
+                removed = True
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        if removed:
+            for exp in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).values()):
+                if not isinstance(exp, dict):
+                    continue
+                for key in ('connections', 'projection_connections', 'internal_connections', 'interface_connections'):
+                    cleaned = []
+                    for c in list(exp.get(key, []) or []):
+                        try:
+                            if isinstance(c, ConnectionItem) and c.scene() is self.scene:
+                                cleaned.append(c)
+                        except RuntimeError:
+                            continue
+                    exp[key] = cleaned
+        return removed
+
     def _remove_inline_expansion_visuals(self, expansion, show_container=True, show_connections=True):
         if not expansion:
             return
         container_node = expansion.get("container_node")
+        try:
+            cid = getattr(getattr(container_node, 'node_data', None), 'node_id', None)
+            if cid:
+                self._remove_inline_scope_connection_items([cid])
+        except Exception:
+            pass
         if container_node is not None and show_container:
             try:
                 container_node.setVisible(True)
@@ -2495,6 +3466,11 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         for node in list(expansion.get("interface_nodes", []) or []):
             try:
                 self.scene.removeItem(node)
+            except RuntimeError:
+                pass
+        for zitem in list(expansion.get("inline_zone_boundaries", []) or []):
+            try:
+                self.scene.removeItem(zitem)
             except RuntimeError:
                 pass
         boundary = expansion.get("boundary")
@@ -2558,6 +3534,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             'boundary_rect': None,
             'node_positions': [],
             'interface_positions': [],
+            'inline_zone_rects': [],
             'connection_routes': [],
         }
         container = expansion.get('container_node')
@@ -2581,6 +3558,11 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         for node in list(expansion.get('interface_nodes', []) or []):
             try:
                 state['interface_positions'].append((node, QtCore.QPointF(node.pos())))
+            except RuntimeError:
+                continue
+        for zitem in list(expansion.get('inline_zone_boundaries', []) or []):
+            try:
+                state['inline_zone_rects'].append((zitem, QtCore.QRectF(getattr(zitem, '_rect', QtCore.QRectF()))))
             except RuntimeError:
                 continue
         for conn in list(expansion.get('connections', []) or []):
@@ -2636,6 +3618,11 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     node.setPos(QtCore.QPointF(base_pos) + delta)
                 except RuntimeError:
                     continue
+            for zitem, rect in list(start_state.get('inline_zone_rects', []) or []):
+                try:
+                    zitem.set_rect(QtCore.QRectF(rect).translated(delta))
+                except RuntimeError:
+                    pass
             # Boundary interface ports are derived from the boundary rect, not
             # incrementally moved. Reposition them from the translated rect so
             # their centers stay locked directly on the dashed edge while the
@@ -2652,10 +3639,17 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         finally:
             self.scene._suspend_undo = previous_suspend
             self._suspend_inline_bounds_refresh = previous_bounds_suspend
+
+        # A direct drag of an expanded sub-container can otherwise place the
+        # dashed child surface over a graph zone.  Resolve that as a vertical
+        # layout reflow rather than allowing overlap.
+        if not bool(getattr(self, '_suspend_inline_zone_avoidance', False)):
+            self._avoid_zone_overlap_for_inline_expansion(container_id)
+
         if hasattr(self.scene, 'ensure_logical_scene_rect'):
             boundary = expansion.get('boundary')
             if boundary is not None:
-                self.scene.ensure_logical_scene_rect(boundary.sceneBoundingRect())
+                self.scene.ensure_logical_scene_rect(self._layout_rect_for_item(boundary))
         return True
 
     def _apply_inline_expansion_group_move(self, container_id, new_container_pos):
@@ -2703,56 +3697,128 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 continue
         return translated
 
-    def _translate_inline_expansion(self, container_id, dx, dy=0.0, move_container=False):
+    def _translate_inline_expansion(self, container_id, dx, dy=0.0, move_container=False, _visited=None):
         expansion = self._inline_subgraph_expansions.get(container_id)
         if not expansion:
             return False
+        if _visited is None:
+            _visited = set()
+        if container_id in _visited:
+            return False
+        _visited.add(container_id)
         delta = QtCore.QPointF(float(dx), float(dy))
-        if move_container:
-            container = expansion.get("container_node")
-            if container is not None:
+        previous_bounds_suspend = bool(getattr(self, '_suspend_inline_bounds_refresh', False))
+        self._suspend_inline_bounds_refresh = True
+        try:
+            if move_container:
+                container = expansion.get("container_node")
+                if container is not None:
+                    try:
+                        container.setPos(container.pos() + delta)
+                    except RuntimeError:
+                        pass
+            for node in list(expansion.get("nodes", []) or []):
                 try:
-                    container.setPos(container.pos() + delta)
+                    node.setPos(node.pos() + delta)
                 except RuntimeError:
                     pass
-        for node in list(expansion.get("nodes", []) or []):
-            try:
-                node.setPos(node.pos() + delta)
-            except RuntimeError:
-                pass
-        boundary = expansion.get("boundary")
-        if boundary is not None:
-            try:
-                boundary.setPos(boundary.pos() + delta)
-            except RuntimeError:
-                pass
-        for conn in list(expansion.get("connections", []) or []):
-            try:
-                if getattr(conn, "route_points", None):
-                    conn.set_route_points([QtCore.QPointF(point) + delta for point in conn.route_points])
-                else:
+            boundary = expansion.get("boundary")
+            if boundary is not None:
+                try:
+                    # Inline boundary geometry is stored as a scene-space _rect.
+                    # Moving item.pos() while also using scene-space rects creates
+                    # a double-offset and is the main cause of huge nested frames.
+                    rect = QtCore.QRectF(getattr(boundary, '_rect', QtCore.QRectF()))
+                    boundary.prepareGeometryChange()
+                    boundary.setPos(QtCore.QPointF(0.0, 0.0))
+                    boundary._rect = rect.translated(delta)
+                    boundary.update()
+                except RuntimeError:
+                    pass
+            for zitem in list(expansion.get("inline_zone_boundaries", []) or []):
+                try:
+                    rect = QtCore.QRectF(getattr(zitem, '_rect', QtCore.QRectF()))
+                    if rect.isValid() and not rect.isNull():
+                        zitem.set_rect(rect.translated(delta))
+                    else:
+                        zitem.setPos(zitem.pos() + delta)
+                except RuntimeError:
+                    pass
+            # Move any already-open descendant expansions as part of the same
+            # visual subtree. The hidden child container node was moved above as
+            # one of this expansion's nodes, so descendant calls must not move
+            # their container node a second time.
+            for child_id, child_exp in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+                if child_id == container_id or not isinstance(child_exp, dict):
+                    continue
+                child_container = child_exp.get('container_node')
+                if getattr(child_container, '_inline_subgraph_parent_id', None) == container_id:
+                    self._translate_inline_expansion(child_id, dx, dy, move_container=False, _visited=_visited)
+            self._position_inline_boundary_interface_nodes(container_id)
+            connection_items = []
+            for key in ("connections", "internal_connections", "interface_connections", "projection_connections"):
+                for conn in list(expansion.get(key, []) or []):
+                    if conn is not None and conn not in connection_items:
+                        connection_items.append(conn)
+            for conn in connection_items:
+                try:
+                    if getattr(conn, "route_points", None):
+                        conn.set_route_points([QtCore.QPointF(point) + delta for point in conn.route_points])
                     conn.update_path()
                     conn.sync_pin_items()
-            except RuntimeError:
-                pass
+                except RuntimeError:
+                    pass
+        finally:
+            self._suspend_inline_bounds_refresh = previous_bounds_suspend
         return True
 
-    def _shift_inline_expansions_after_x(self, threshold_x, dx, skip_container_id=None):
+    def _shift_inline_expansions_after_x(self, threshold_x, dx, skip_container_id=None, parent_scope=None):
+        """Shift already-expanded sibling inline regions to make room.
+
+        Inline expansions are scoped.  A top-level expansion should not move
+        nested child expansions, and a nested expansion should not move top-level
+        or descendant expansions from another child graph.  Moving unrelated
+        boundaries is what created the very wide/empty zone frames when expanding
+        a sub-container inside another expanded sub-container.
+        """
         shifted = []
         for container_id, expansion in list(getattr(self, "_inline_subgraph_expansions", {}).items()):
             if container_id == skip_container_id:
+                continue
+            if not isinstance(expansion, dict):
+                continue
+            container = expansion.get("container_node")
+            container_parent_scope = getattr(container, '_inline_subgraph_parent_id', None) if container is not None else None
+            if (parent_scope or None) != (container_parent_scope or None):
                 continue
             boundary = expansion.get("boundary")
             if boundary is None:
                 continue
             try:
-                if boundary.sceneBoundingRect().left() > float(threshold_x):
-                    if self._translate_inline_expansion(container_id, dx, 0.0):
-                        shifted.append({"container_id": container_id, "dx": float(dx)})
+                if self._layout_rect_for_item(boundary).left() > float(threshold_x):
+                    if self._translate_inline_expansion(container_id, dx, 0.0, move_container=True):
+                        shifted.append({"container_id": container_id, "dx": float(dx), "parent_scope": parent_scope})
             except RuntimeError:
                 continue
         return shifted
 
+    def _inline_scope_boundary_items(self, scope_id):
+        """Return visual zone/boundary items that belong directly to an inline scope."""
+        items = []
+        for cid, exp in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+            if not isinstance(exp, dict):
+                continue
+            container = exp.get('container_node')
+            if getattr(container, '_inline_subgraph_parent_id', None) != scope_id:
+                continue
+            boundary = exp.get('boundary')
+            if boundary is not None:
+                items.append(boundary)
+        parent_exp = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(scope_id) or {}
+        for zitem in list(parent_exp.get('inline_zone_boundaries', []) or []):
+            if zitem is not None:
+                items.append(zitem)
+        return items
 
 
     def _make_inline_boundary_interface_node(self, container_id, side, names):
@@ -2983,6 +4049,79 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self._make_inline_connection_read_only(citem)
         return citem
 
+    def _active_inline_projection_connection_set(self):
+        """Return projection ConnectionItems still owned by active inline expansions."""
+        active = set()
+        for exp in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).values()):
+            if not isinstance(exp, dict):
+                continue
+            for key in ('connections', 'projection_connections', 'internal_connections', 'interface_connections'):
+                for conn in list(exp.get(key, []) or []):
+                    try:
+                        if isinstance(conn, ConnectionItem):
+                            active.add(conn)
+                    except RuntimeError:
+                        continue
+        return active
+
+    def _sweep_stale_inline_projection_wires(self):
+        """Remove orphaned inline projection wires left after nested edit/collapse.
+
+        Projection wires are scene visuals, not durable model wires.  Nested
+        expanded subgraphs can create both parent bridge projections and
+        child-interface projections.  If a nested collapse removes interface
+        nodes before every projection is deregistered from its owner list, Qt can
+        leave a floating ConnectionItem with no live visual endpoints.  Those are
+        the short residual pink wire segments seen on the main graph.
+        """
+        active = self._active_inline_projection_connection_set()
+        removed = False
+        try:
+            items = list(self.scene.items())
+        except RuntimeError:
+            return False
+        for conn in items:
+            try:
+                if not isinstance(conn, ConnectionItem) or not getattr(conn, 'is_projection', False):
+                    continue
+                source_node = getattr(getattr(conn, 'source_port', None), 'parent_node', None)
+                target_node = getattr(getattr(conn, 'target_port', None), 'parent_node', None)
+                source_live = source_node is not None and source_node.scene() is self.scene and source_node.isVisible()
+                target_live = target_node is not None and target_node.scene() is self.scene and target_node.isVisible()
+                # Keep active expansion-owned projection wires whose endpoints
+                # are still live.  Remove everything else; it is an orphan visual
+                # and should be rebuilt from model data if needed.
+                if conn in active and source_live and target_live:
+                    continue
+                conn.remove_from_ports()
+                for pin in list(getattr(conn, 'pin_items', []) or []):
+                    try:
+                        self.scene.removeItem(pin)
+                    except RuntimeError:
+                        pass
+                self.scene.removeItem(conn)
+                removed = True
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        # Also scrub dead references from expansion lists so future refreshes do
+        # not re-treat deleted projection objects as owned/active.
+        if removed:
+            for exp in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).values()):
+                if not isinstance(exp, dict):
+                    continue
+                for key in ('connections', 'projection_connections', 'internal_connections', 'interface_connections'):
+                    cleaned = []
+                    for c in list(exp.get(key, []) or []):
+                        try:
+                            if isinstance(c, ConnectionItem) and c.scene() is self.scene:
+                                cleaned.append(c)
+                        except RuntimeError:
+                            continue
+                    exp[key] = cleaned
+        return removed
+
     def _remove_inline_projection_connections(self, expansion):
         """Remove only visual bridge wires for an inline expansion."""
         if not expansion:
@@ -3116,6 +4255,44 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         }
         return self._add_inline_projection_connection_from_dict(conn_entry)
 
+    def _inline_hidden_connection_entries_for_projection(self):
+        """Return hidden real wires that should be projected through expanded boundaries.
+
+        Root graph wires are available from scene.serialize_graph(), but editable
+        inline child-scope wires are deliberately skipped by serialize_graph()
+        because they are projection visuals.  When a nested sub-container is
+        expanded, the real inline wire connected to that now-hidden proxy is
+        hidden and tracked on the expansion.  Those hidden inline wires are the
+        authoritative parent-scope connections for second-level expansion, so
+        projection rebuild must read them directly.
+        """
+        entries = []
+        seen_items = set()
+        for cid, expansion in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+            if not isinstance(expansion, dict):
+                continue
+            for conn in list(expansion.get('hidden_connections', []) or []):
+                try:
+                    if conn is None or id(conn) in seen_items:
+                        continue
+                    seen_items.add(id(conn))
+                    data = conn.to_dict() if hasattr(conn, 'to_dict') else None
+                    if not data:
+                        continue
+                    # Only project wires whose source/target is currently an
+                    # expanded container. Other hidden wires are restored on
+                    # collapse but should not generate bridge projections.
+                    sid = data.get('source_node_id')
+                    tid = data.get('target_node_id')
+                    if sid not in self._inline_subgraph_expansions and tid not in self._inline_subgraph_expansions:
+                        continue
+                    entries.append(dict(data))
+                except RuntimeError:
+                    continue
+                except Exception:
+                    continue
+        return entries
+
     def _refresh_inline_projection_connections(self):
         """Rebuild all inter-layer bridge wires for expanded containers.
 
@@ -3128,7 +4305,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         """
         expansions = getattr(self, '_inline_subgraph_expansions', {}) or {}
         if not expansions:
+            self._sweep_stale_inline_projection_wires()
             return
+        self._sweep_stale_inline_projection_wires()
         for expansion in list(expansions.values()):
             self._remove_inline_projection_connections(expansion)
         # Defensive cleanup: when a projection was tracked by multiple expanded
@@ -3156,6 +4335,11 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             graph_connections = list(self.scene.serialize_graph().get("connections", []) or [])
         except Exception:
             graph_connections = []
+        # Add hidden inline child-scope wires that connect to nested expanded
+        # containers.  Without this, second-level expansions keep the old wire
+        # hidden/dangling instead of projecting through the nested boundary.
+        for hidden_entry in self._inline_hidden_connection_entries_for_projection():
+            graph_connections.append(hidden_entry)
 
         seen = set()
         created_by_container = {cid: [] for cid in expansions.keys()}
@@ -3201,6 +4385,949 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     if item not in connections:
                         connections.append(item)
                 expansions[cid]["connections"] = connections
+        self._sweep_stale_inline_projection_wires()
+
+    def _inline_zone_definitions_for_container(self, node_item, subgraph=None):
+        """Return zone definitions for the child graph projected inline.
+
+        Inline expansion is a projection of a child graph.  Its zone ids belong
+        to that child graph, not to the parent scene's active view.  Use the
+        subgraph metadata/view id first, then fall back to the container type's
+        expected child view.
+        """
+        view_id = None
+        try:
+            if isinstance(subgraph, dict):
+                metadata = subgraph.get('metadata') or {}
+                view_id = metadata.get('active_node_view_id')
+        except Exception:
+            view_id = None
+        if not view_id and node_item is not None:
+            try:
+                view_id = self._expected_node_view_id_for_container_type(getattr(getattr(node_item, 'node_data', None), 'node_type', None))
+            except Exception:
+                view_id = None
+        try:
+            view = NODE_VIEW_REGISTRY.get(view_id) if view_id else None
+            return sorted([z for z in list(getattr(view, 'zones', []) or []) if getattr(z, 'zone_id', None)], key=lambda z: (int(getattr(z, 'order', 0) or 0), str(getattr(z, 'zone_id', ''))))
+        except Exception:
+            return []
+
+    def _normalize_scene_rect_boundary_item(self, item):
+        """Keep boundary items in a single coordinate model for layout.
+
+        ZoneBoundaryItem and InlineSubgraphBoundaryItem store their geometry in
+        ``_rect`` as scene-space coordinates.  They must stay at item.pos()==0.
+        Several earlier expansion paths moved these items with setPos(), which
+        makes sceneBoundingRect() equal ``pos + _rect`` and causes every parent
+        zone/container to size around a phantom/double-offset rectangle.
+        Normalize before any layout measurement or translation.
+        """
+        try:
+            if not isinstance(item, (ZoneBoundaryItem, InlineSubgraphBoundaryItem)):
+                return False
+            pos = QtCore.QPointF(item.pos())
+            if abs(pos.x()) <= 0.001 and abs(pos.y()) <= 0.001:
+                return False
+            rect = QtCore.QRectF(getattr(item, '_rect', QtCore.QRectF()))
+            item.prepareGeometryChange()
+            item.setPos(QtCore.QPointF(0.0, 0.0))
+            item._rect = rect.translated(pos)
+            if isinstance(item, ZoneBoundaryItem):
+                try:
+                    item._position_default_exec_ports()
+                except Exception:
+                    pass
+            item.update()
+            return True
+        except RuntimeError:
+            return False
+        except Exception:
+            return False
+
+    def _layout_rect_for_item(self, item):
+        """Return a clean scene rect for nodes/boundaries used by layout."""
+        try:
+            if item is None:
+                return QtCore.QRectF()
+            self._normalize_scene_rect_boundary_item(item)
+            return QtCore.QRectF(item.sceneBoundingRect())
+        except RuntimeError:
+            return QtCore.QRectF()
+        except Exception:
+            return QtCore.QRectF()
+
+    def _translate_boundary_rect_item(self, item, delta):
+        """Translate a scene-space boundary item without using item.setPos()."""
+        try:
+            if item is None:
+                return False
+            delta = QtCore.QPointF(delta)
+            if isinstance(item, (ZoneBoundaryItem, InlineSubgraphBoundaryItem)):
+                self._normalize_scene_rect_boundary_item(item)
+                rect = QtCore.QRectF(getattr(item, '_rect', QtCore.QRectF()))
+                if hasattr(item, 'set_rect'):
+                    item.set_rect(rect.translated(delta))
+                else:
+                    item.prepareGeometryChange(); item._rect = rect.translated(delta); item.update()
+                return True
+            item.setPos(item.pos() + delta)
+            return True
+        except RuntimeError:
+            return False
+        except Exception:
+            return False
+
+    def _normalize_all_inline_boundary_rect_items(self):
+        """Repair any boundary items left with non-zero item positions."""
+        changed = False
+        for exp in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).values()):
+            if not isinstance(exp, dict):
+                continue
+            changed = self._normalize_scene_rect_boundary_item(exp.get('boundary')) or changed
+            for zitem in list(exp.get('inline_zone_boundaries', []) or []):
+                changed = self._normalize_scene_rect_boundary_item(zitem) or changed
+        for zitem in list((getattr(self, '_zone_boundaries', {}) or {}).values()):
+            changed = self._normalize_scene_rect_boundary_item(zitem) or changed
+        return changed
+
+    def _fit_rect_for_items(self, items, *, pad_left=60.0, pad_top=72.0, pad_right=60.0, pad_bottom=64.0, min_w=360.0, min_h=220.0):
+        rect = QtCore.QRectF()
+        for item in list(items or []):
+            try:
+                br = self._layout_rect_for_item(item)
+                if br.isValid() and not br.isNull():
+                    rect = br if rect.isNull() else rect.united(br)
+            except RuntimeError:
+                continue
+        if rect.isNull() or not rect.isValid():
+            return QtCore.QRectF()
+        rect = rect.adjusted(-float(pad_left), -float(pad_top), float(pad_right), float(pad_bottom))
+        if rect.width() < min_w:
+            cx = rect.center().x(); rect.setLeft(cx - min_w / 2.0); rect.setRight(cx + min_w / 2.0)
+        if rect.height() < min_h:
+            cy = rect.center().y(); rect.setTop(cy - min_h / 2.0); rect.setBottom(cy + min_h / 2.0)
+        return rect
+
+
+    def _node_identifier_for_layout_order(self, item):
+        """Stable node id used by execution-order layout helpers."""
+        try:
+            data = getattr(item, 'node_data', None)
+            nid = getattr(data, 'node_id', None)
+            if nid:
+                return str(nid)
+        except Exception:
+            pass
+        try:
+            return str(id(item))
+        except Exception:
+            return ''
+
+    def _execution_order_ranks_for_nodes(self, nodes, *, scope_container_id=None):
+        """Return node->rank based on exec-wire reachability within a scope.
+
+        Layout compaction used to sort by current x position.  That preserves
+        stale positions across expand/collapse and lets nodes such as Sequence
+        and Sub-Graph Container trade places visually.  Instead, derive a stable
+        order from visible execution wires in the same graph/inline scope, then
+        fall back to x-position only for disconnected nodes.
+        """
+        node_list = []
+        seen = set()
+        for node in list(nodes or []):
+            try:
+                if node is None or not isinstance(node, NodeItem):
+                    continue
+                if getattr(node, '_inline_boundary_interface', False):
+                    continue
+
+                # Expanded subgraph layout uses the hidden container proxy as
+                # the logical node that participates in the parent graph's
+                # execution order.  The visible object is the expanded boundary,
+                # but the model wire still flows through the hidden proxy or
+                # through its boundary-interface projection nodes.  Older
+                # ordering code dropped hidden proxies because they are not
+                # visible, which made a zone containing both an expanded
+                # subgraph and normal nodes fall back to stale x-position.
+                # Keep explicitly supplied hidden proxies as ranking anchors.
+                hidden_proxy = bool(self._is_hidden_expanded_container_proxy(node))
+                if hasattr(node, 'isVisible') and not node.isVisible() and not hidden_proxy:
+                    continue
+                if scope_container_id is not None and getattr(node, '_inline_subgraph_parent_id', None) != scope_container_id:
+                    continue
+                if scope_container_id is None and getattr(node, '_inline_subgraph_display', False):
+                    continue
+                if node in seen:
+                    continue
+                seen.add(node); node_list.append(node)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        if not node_list:
+            return {}
+
+        node_set = set(node_list)
+        edges = []
+        incoming = {n: 0 for n in node_list}
+        outgoing = {n: [] for n in node_list}
+
+        def normalize_order_node(node):
+            """Map inline boundary-interface endpoints to their hidden proxy.
+
+            When a subgraph is expanded inline, parent/sibling execution wires
+            are redrawn to adapter nodes on the expanded boundary.  For layout,
+            those adapter endpoints still mean "the expanded container node".
+            Without this normalization, a wire such as
+
+                expanded-subgraph Exec Out -> next node
+
+            is invisible to the ordering algorithm, so the next node can be
+            packed before/over the expanded subgraph.
+            """
+            try:
+                if node is None:
+                    return None
+                if getattr(node, '_inline_boundary_interface', False):
+                    owner_id = getattr(node, '_inline_subgraph_parent_id', None)
+                    owner = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(owner_id) or {}
+                    proxy = owner.get('container_node')
+                    if proxy in node_set:
+                        return proxy
+                return node
+            except RuntimeError:
+                return None
+            except Exception:
+                return node
+
+        try:
+            scene_items = list(self.scene.items()) if self.scene is not None else []
+        except Exception:
+            scene_items = []
+        for item in scene_items:
+            try:
+                if not isinstance(item, ConnectionItem):
+                    continue
+                if item.source_port is None or item.target_port is None:
+                    continue
+                if item.connection_kind() != 'exec':
+                    continue
+                src = normalize_order_node(getattr(item.source_port, 'parent_node', None))
+                dst = normalize_order_node(getattr(item.target_port, 'parent_node', None))
+                if src not in node_set or dst not in node_set or src is dst:
+                    continue
+                edges.append((src, dst))
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        for src, dst in edges:
+            if dst not in outgoing.get(src, []):
+                outgoing[src].append(dst)
+                incoming[dst] = incoming.get(dst, 0) + 1
+
+        def fallback_key(n):
+            try:
+                r = self._layout_rect_for_item(n)
+                return (float(r.left()), float(r.top()), self._node_identifier_for_layout_order(n))
+            except Exception:
+                return (0.0, 0.0, self._node_identifier_for_layout_order(n))
+
+        # Prefer actual graph entry nodes when present, then other zero-in-degree nodes.
+        def is_start(n):
+            try:
+                return getattr(getattr(n, 'node_data', None), 'node_type', None) == 'flow.start'
+            except Exception:
+                return False
+        queue = sorted([n for n in node_list if incoming.get(n, 0) == 0], key=lambda n: (0 if is_start(n) else 1, fallback_key(n)))
+        ranks = {}
+        rank = 0
+        while queue:
+            cur = queue.pop(0)
+            if cur in ranks:
+                continue
+            ranks[cur] = rank; rank += 1
+            for nxt in sorted(outgoing.get(cur, []) or [], key=fallback_key):
+                incoming[nxt] = max(0, incoming.get(nxt, 0) - 1)
+                if incoming[nxt] == 0 and nxt not in ranks and nxt not in queue:
+                    queue.append(nxt)
+            queue.sort(key=lambda n: (0 if is_start(n) else 1, fallback_key(n)))
+        for node in sorted(node_list, key=fallback_key):
+            if node not in ranks:
+                ranks[node] = rank; rank += 1
+        return ranks
+
+    def _linearize_top_level_zone_nodes(self, zone_id):
+        """Lay out nodes inside a top-level zone by execution order."""
+        if bool(getattr(self, '_suspend_zone_node_linearize', False)):
+            return False
+        boundary = (getattr(self, '_zone_boundaries', {}) or {}).get(str(zone_id))
+        if boundary is None:
+            return False
+        nodes = [n for n in self._zone_owned_nodes(zone_id) if not self._is_hidden_expanded_container_proxy(n)]
+        visible = []
+        for n in nodes:
+            try:
+                if hasattr(n, 'isVisible') and not n.isVisible():
+                    continue
+                visible.append(n)
+            except RuntimeError:
+                continue
+        if len(visible) <= 1:
+            return False
+        ranks = self._execution_order_ranks_for_nodes(visible, scope_container_id=None)
+        try:
+            zrect = self._zone_visual_rect(boundary)
+            content_left = zrect.left() + 72.0
+            lane_center_y = zrect.center().y() + 8.0
+        except Exception:
+            content_left = min((self._layout_rect_for_item(n).left() for n in visible), default=0.0)
+            lane_center_y = sorted([self._layout_rect_for_item(n).center().y() for n in visible])[len(visible)//2]
+        ordered = sorted(visible, key=lambda n: (int(ranks.get(n, 10**6)), self._layout_rect_for_item(n).left(), self._node_identifier_for_layout_order(n)))
+        cursor = float(content_left)
+        gap = 52.0
+        changed = False
+        prev_undo = bool(getattr(self.scene, '_suspend_undo', False))
+        prev_zone = bool(getattr(self, '_suspend_zone_layout', False))
+        try:
+            self.scene._suspend_undo = True
+            self._suspend_zone_layout = True
+            for node in ordered:
+                br = self._layout_rect_for_item(node)
+                if not br.isValid() or br.isNull():
+                    continue
+                dx = cursor - float(br.left())
+                dy = float(lane_center_y) - float(br.center().y())
+                if abs(dx) > 1.0 or abs(dy) > 1.0:
+                    node.setPos(node.pos() + QtCore.QPointF(dx, dy))
+                    if getattr(node, 'node_data', None) is not None:
+                        node.node_data.x = node.pos().x(); node.node_data.y = node.pos().y()
+                    changed = True
+                    br = self._layout_rect_for_item(node)
+                cursor = float(br.right()) + gap
+        finally:
+            self.scene._suspend_undo = prev_undo
+            self._suspend_zone_layout = prev_zone
+        if changed:
+            for node in ordered:
+                try:
+                    for port in list(getattr(node, 'inputs', []) or []) + list(getattr(node, 'outputs', []) or []):
+                        for conn in list(getattr(port, 'connections', []) or []):
+                            conn.update_path(); conn.sync_pin_items()
+                except Exception:
+                    pass
+        return changed
+
+    def _linearize_inline_zone_nodes(self, container_id):
+        """Lay out direct visible content inside each inline child zone as a lane.
+
+        This pass is deliberately stronger than overlap repair.  It treats every
+        direct visible node plus every visible nested expansion boundary owned by
+        the same child zone as ordered lane entries, places them left-to-right,
+        and aligns their vertical centers.  The resulting scene positions are
+        then serialized during collapse, so re-expansion does not resurrect old
+        stacked coordinates.
+        """
+        if bool(getattr(self, '_suspend_inline_zone_linearize', False)):
+            return False
+        expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id)
+        if not isinstance(expansion, dict):
+            return False
+
+        def child_zone_id(zitem):
+            raw = str(getattr(zitem, 'zone_id', '') or '')
+            return raw.split(':', 1)[1] if ':' in raw else raw
+
+        zitem_by_zone = {}
+        for zitem in list(expansion.get('inline_zone_boundaries', []) or []):
+            try:
+                zid = child_zone_id(zitem)
+                if zid:
+                    zitem_by_zone[str(zid)] = zitem
+            except Exception:
+                continue
+
+        entries_by_zone = {}
+        for node in list(expansion.get('nodes', []) or []):
+            try:
+                if getattr(node, '_inline_subgraph_parent_id', None) != container_id:
+                    continue
+                if getattr(node, '_inline_boundary_interface', False):
+                    continue
+                if self._is_hidden_expanded_container_proxy(node):
+                    continue
+                if hasattr(node, 'isVisible') and not node.isVisible():
+                    continue
+                zid = self._inline_node_zone_id(node)
+                if zid:
+                    entries_by_zone.setdefault(str(zid), []).append({'kind': 'node', 'item': node})
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        # A hidden sub-container proxy is represented by its nested expansion
+        # boundary. Include that boundary as an entry in the proxy's zone, and
+        # move the whole nested expansion when placing it.
+        for nested_id, nested in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+            try:
+                if str(nested_id) == str(container_id) or not isinstance(nested, dict):
+                    continue
+                nested_container = nested.get('container_node')
+                if getattr(nested_container, '_inline_subgraph_parent_id', None) != container_id:
+                    continue
+                zid = self._inline_node_zone_id(nested_container)
+                boundary = nested.get('boundary')
+                if zid and boundary is not None:
+                    entries_by_zone.setdefault(str(zid), []).append({'kind': 'nested', 'id': str(nested_id), 'item': boundary})
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        changed = False
+        gap = 48.0
+        for zid, entries in list(entries_by_zone.items()):
+            if not entries:
+                continue
+            zitem = zitem_by_zone.get(str(zid))
+            try:
+                if zitem is not None:
+                    zrect = QtCore.QRectF(getattr(zitem, '_rect', QtCore.QRectF()))
+                    content_left = zrect.left() + 42.0
+                    lane_center_y = zrect.center().y() + 8.0
+                else:
+                    rects = [self._layout_rect_for_item(e.get('item')) for e in entries]
+                    acc = QtCore.QRectF()
+                    for r in rects:
+                        if r.isValid() and not r.isNull():
+                            acc = r if acc.isNull() else acc.united(r)
+                    content_left = acc.left() if acc.isValid() and not acc.isNull() else 0.0
+                    lane_center_y = acc.center().y() if acc.isValid() and not acc.isNull() else 0.0
+            except Exception:
+                content_left = 0.0
+                lane_center_y = 0.0
+
+            # Derive lane order from execution wires, not from stale x positions.
+            rank_nodes = []
+            for entry in entries:
+                if entry.get('kind') == 'node':
+                    rank_nodes.append(entry.get('item'))
+                elif entry.get('kind') == 'nested':
+                    nested = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(str(entry.get('id'))) or {}
+                    rank_nodes.append(nested.get('container_node'))
+            ranks = self._execution_order_ranks_for_nodes(rank_nodes, scope_container_id=container_id)
+
+            def sort_key(entry):
+                try:
+                    item = entry.get('item')
+                    rank_item = item
+                    if entry.get('kind') == 'nested':
+                        nested = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(str(entry.get('id'))) or {}
+                        rank_item = nested.get('container_node') or item
+                    br = self._layout_rect_for_item(item)
+                    return (int(ranks.get(rank_item, 10**6)), float(br.left()), float(br.top()), self._node_identifier_for_layout_order(rank_item))
+                except Exception:
+                    return (10**6, 0.0, 0.0, str(entry.get('id', '')))
+            entries.sort(key=sort_key)
+
+            cursor = float(content_left)
+            for entry in entries:
+                item = entry.get('item')
+                try:
+                    br = self._layout_rect_for_item(item)
+                    if not br.isValid() or br.isNull():
+                        continue
+                    dx = cursor - float(br.left())
+                    dy = float(lane_center_y) - float(br.center().y())
+                    if abs(dx) > 1.0 or abs(dy) > 1.0:
+                        if entry.get('kind') == 'nested':
+                            self._translate_inline_expansion(str(entry.get('id')), float(dx), float(dy), move_container=False)
+                        else:
+                            node = entry.get('item')
+                            node.setPos(node.pos() + QtCore.QPointF(dx, dy))
+                            if getattr(node, 'node_data', None) is not None:
+                                node.node_data.x = node.pos().x(); node.node_data.y = node.pos().y()
+                        changed = True
+                        br = self._layout_rect_for_item(item)
+                    cursor = float(br.right()) + gap
+                except RuntimeError:
+                    continue
+                except Exception:
+                    continue
+        return changed
+
+    def _refresh_inline_zone_boundaries(self, container_id):
+        """Compact visual child-zone boundaries inside an inline expansion.
+
+        Inline child zones must be measured from the *visible* representatives
+        in that inline scope only.  Hidden sub-container proxy nodes, boundary
+        interface nodes, connection items, and stale/empty zone rectangles must
+        not feed back into the fit calculation.  Nested expansions contribute
+        their visible dashed boundary to the zone that owns the hidden proxy.
+        """
+        expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id)
+        if not isinstance(expansion, dict):
+            return False
+        zitems = list(expansion.get('inline_zone_boundaries', []) or [])
+        if not zitems:
+            return False
+        changed = self._linearize_inline_zone_nodes(container_id)
+
+        by_zone = {}
+        for node in list(expansion.get('nodes', []) or []):
+            try:
+                if getattr(node, '_inline_subgraph_parent_id', None) != container_id:
+                    continue
+                if getattr(node, '_inline_boundary_interface', False):
+                    continue
+                if self._is_hidden_expanded_container_proxy(node):
+                    continue
+                if hasattr(node, 'isVisible') and not node.isVisible():
+                    continue
+                zid = self._inline_node_zone_id(node)
+                if zid:
+                    by_zone.setdefault(str(zid), []).append(node)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        # A nested expanded sub-container visually replaces one child node.
+        # Include only the visible nested boundary in the owning child zone.
+        for nested_id, nested in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+            if nested_id == container_id or not isinstance(nested, dict):
+                continue
+            nested_container = nested.get('container_node')
+            if getattr(nested_container, '_inline_subgraph_parent_id', None) != container_id:
+                continue
+            zid = self._inline_node_zone_id(nested_container)
+            nboundary = nested.get('boundary')
+            if zid and nboundary is not None:
+                by_zone.setdefault(str(zid), []).append(nboundary)
+
+        min_w = 300.0
+        min_h = 185.0
+        gap = 36.0
+
+        # First shrink/grow each zone around direct visible contributors.  Empty
+        # zones are shrunk to a small stable rectangle at their current center so
+        # a stale huge empty zone cannot stretch every ancestor boundary.
+        zone_rects = {}
+        for zitem in zitems:
+            try:
+                raw = str(getattr(zitem, 'zone_id', '') or '')
+                child_zid = raw.split(':', 1)[1] if ':' in raw else raw
+                contributors = by_zone.get(child_zid, [])
+                fit = self._fit_rect_for_items(contributors, min_w=min_w, min_h=min_h)
+                old = QtCore.QRectF(getattr(zitem, '_rect', QtCore.QRectF()))
+                if fit.isNull() or not fit.isValid():
+                    center = old.center() if old.isValid() and not old.isNull() else QtCore.QPointF(0.0, 0.0)
+                    fit = QtCore.QRectF(center.x() - min_w / 2.0, center.y() - min_h / 2.0, min_w, min_h)
+                if old != fit:
+                    zitem.set_rect(fit)
+                    changed = True
+                zone_rects[child_zid] = QtCore.QRectF(fit)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        # Then reclaim horizontal gaps between child zones within this inline
+        # scope.  Move zone contents as a scoped group so nodes do not appear to
+        # jump out of their child zones, and update descendant expanded groups
+        # along with the boundary that represents them.
+        ordered = []
+        for idx, zitem in enumerate(zitems):
+            try:
+                raw = str(getattr(zitem, 'zone_id', '') or '')
+                child_zid = raw.split(':', 1)[1] if ':' in raw else raw
+                rect = QtCore.QRectF(getattr(zitem, '_rect', QtCore.QRectF()))
+                ordered.append((idx, child_zid, zitem, rect))
+            except Exception:
+                continue
+        ordered.sort(key=lambda t: (int(getattr(t[2], '_inline_zone_order', t[0]) or 0), t[0]))
+        previous_right = None
+        for _idx, child_zid, zitem, rect in ordered:
+            if previous_right is None:
+                previous_right = rect.right()
+                continue
+            target_left = previous_right + gap
+            dx = target_left - rect.left()
+            if abs(dx) > 1.0:
+                delta = QtCore.QPointF(dx, 0.0)
+                try:
+                    zitem.set_rect(QtCore.QRectF(rect).translated(delta))
+                    changed = True
+                except RuntimeError:
+                    pass
+                # Move visible direct nodes in this child zone.
+                for item in list(by_zone.get(child_zid, []) or []):
+                    try:
+                        if isinstance(item, NodeItem):
+                            item.setPos(item.pos() + delta)
+                            if getattr(item, 'node_data', None) is not None:
+                                item.node_data.x = item.pos().x()
+                                item.node_data.y = item.pos().y()
+                    except RuntimeError:
+                        continue
+                # Move any nested expanded group whose hidden proxy belongs to
+                # this zone.  The by_zone list contains the boundary, but the
+                # entire group must move together.
+                for nested_id, nested in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+                    if nested_id == container_id or not isinstance(nested, dict):
+                        continue
+                    nested_container = nested.get('container_node')
+                    if getattr(nested_container, '_inline_subgraph_parent_id', None) != container_id:
+                        continue
+                    if str(self._inline_node_zone_id(nested_container) or '') != str(child_zid):
+                        continue
+                    try:
+                        self._translate_inline_expansion(nested_id, float(delta.x()), float(delta.y()), move_container=False)
+                    except Exception:
+                        # Fall back to at least moving the visible boundary.
+                        try:
+                            nb = nested.get('boundary')
+                            if nb is not None:
+                                r = QtCore.QRectF(getattr(nb, '_rect', QtCore.QRectF()))
+                                nb.set_rect(r.translated(delta))
+                        except Exception:
+                            pass
+                rect = QtCore.QRectF(getattr(zitem, '_rect', rect))
+            previous_right = rect.right()
+
+        # Finally compact the full inline scope as ordered layout groups, not
+        # just as independent zone rectangles.  The remaining second-level
+        # expansion failure was caused by a parent inline boundary sizing from
+        # widely-separated child zones/unstyled nodes after a nested expansion
+        # inserted a large region.  Zone rectangles were compact, but the groups
+        # themselves still retained the original shift distance.  Pack each
+        # direct child-zone group, unzoned node, and unzoned nested expansion
+        # left-to-right within this scope so ancestors measure a compact scene
+        # rect instead of a stale expanded lane.
+        try:
+            if self._compact_inline_scope_groups(container_id):
+                changed = True
+        except Exception:
+            pass
+
+        return changed
+
+    def _compact_inline_scope_groups(self, container_id):
+        """Pack direct layout groups inside one inline-expanded graph scope.
+
+        This is intentionally scope-local.  A group is either:
+        - one child zone visual plus the visible nodes/nested expansions it owns,
+        - one unzoned direct inline node, or
+        - one unzoned nested expanded subgraph boundary.
+
+        Moving groups, rather than individual boundaries, keeps nodes visually
+        inside their zones and lets arbitrary nested expansions be measured by a
+        compact bottom-up layout tree.
+        """
+        if bool(getattr(self, '_suspend_inline_scope_compaction', False)):
+            return False
+        if bool(getattr(self, '_inline_scope_group_compact_active', False)):
+            return False
+        expansion = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(container_id)
+        if not isinstance(expansion, dict):
+            return False
+
+        def rect_for_item(item):
+            try:
+                if item is None:
+                    return QtCore.QRectF()
+                return self._layout_rect_for_item(item)
+            except RuntimeError:
+                return QtCore.QRectF()
+            except Exception:
+                return QtCore.QRectF()
+
+        def union_rect(rects):
+            acc = QtCore.QRectF()
+            for r in rects:
+                try:
+                    rr = QtCore.QRectF(r)
+                    if rr.isValid() and not rr.isNull():
+                        acc = rr if acc.isNull() else acc.united(rr)
+                except Exception:
+                    continue
+            return acc
+
+        def move_node(node, delta):
+            try:
+                node.setPos(node.pos() + delta)
+                if getattr(node, 'node_data', None) is not None:
+                    node.node_data.x = node.pos().x()
+                    node.node_data.y = node.pos().y()
+                return True
+            except RuntimeError:
+                return False
+            except Exception:
+                return False
+
+        def move_zone_item(zitem, delta):
+            try:
+                r = QtCore.QRectF(getattr(zitem, '_rect', QtCore.QRectF()))
+                zitem.set_rect(r.translated(delta))
+                return True
+            except RuntimeError:
+                return False
+            except Exception:
+                return False
+
+        zitems = []
+        for zitem in list(expansion.get('inline_zone_boundaries', []) or []):
+            try:
+                raw = str(getattr(zitem, 'zone_id', '') or '')
+                zid = raw.split(':', 1)[1] if ':' in raw else raw
+                if zid:
+                    zitems.append((zid, zitem))
+            except Exception:
+                continue
+
+        direct_nodes = []
+        for node in list(expansion.get('nodes', []) or []):
+            try:
+                if getattr(node, '_inline_subgraph_parent_id', None) != container_id:
+                    continue
+                if getattr(node, '_inline_boundary_interface', False):
+                    continue
+                if self._is_hidden_expanded_container_proxy(node):
+                    continue
+                if hasattr(node, 'isVisible') and not node.isVisible():
+                    continue
+                direct_nodes.append(node)
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+
+        nested_by_zone = {}
+        unzoned_nested = []
+        for nested_id, nested in list((getattr(self, '_inline_subgraph_expansions', {}) or {}).items()):
+            if nested_id == container_id or not isinstance(nested, dict):
+                continue
+            nested_container = nested.get('container_node')
+            if getattr(nested_container, '_inline_subgraph_parent_id', None) != container_id:
+                continue
+            boundary = nested.get('boundary')
+            if boundary is None:
+                continue
+            zid = self._inline_node_zone_id(nested_container)
+            if zid:
+                nested_by_zone.setdefault(str(zid), []).append(str(nested_id))
+            else:
+                unzoned_nested.append(str(nested_id))
+
+        nodes_by_zone = {}
+        unzoned_nodes = []
+        for node in direct_nodes:
+            zid = self._inline_node_zone_id(node)
+            if zid:
+                nodes_by_zone.setdefault(str(zid), []).append(node)
+            else:
+                unzoned_nodes.append(node)
+
+        groups = []
+        seq = 0
+        for zid, zitem in zitems:
+            node_items = list(nodes_by_zone.get(str(zid), []) or [])
+            nested_ids = list(nested_by_zone.get(str(zid), []) or [])
+            rects = [rect_for_item(zitem)] + [rect_for_item(n) for n in node_items]
+            for nid in nested_ids:
+                nb = ((getattr(self, '_inline_subgraph_expansions', {}) or {}).get(nid) or {}).get('boundary')
+                rects.append(rect_for_item(nb))
+            grect = union_rect(rects)
+            if grect.isNull() or not grect.isValid():
+                continue
+            groups.append({
+                'seq': seq,
+                'kind': 'zone',
+                'zid': str(zid),
+                'order': int(getattr(zitem, '_inline_zone_order', seq) or seq),
+                'rect': grect,
+                'zitem': zitem,
+                'nodes': node_items,
+                'nested_ids': nested_ids,
+            })
+            seq += 1
+
+        for node in unzoned_nodes:
+            r = rect_for_item(node)
+            if r.isNull() or not r.isValid():
+                continue
+            groups.append({'seq': seq, 'kind': 'node', 'rect': r, 'node': node})
+            seq += 1
+
+        for nid in unzoned_nested:
+            nested = (getattr(self, '_inline_subgraph_expansions', {}) or {}).get(nid) or {}
+            r = rect_for_item(nested.get('boundary'))
+            if r.isNull() or not r.isValid():
+                continue
+            groups.append({'seq': seq, 'kind': 'nested', 'rect': r, 'nested_id': nid})
+            seq += 1
+
+        if len(groups) <= 1:
+            return False
+
+        def _group_sort_key(g):
+            # Child graph zones have manifest order.  Respect it in inline
+            # projections so nested expanded views lay out like direct-opened
+            # views instead of drifting according to incidental scene x values.
+            if g.get('kind') == 'zone':
+                return (0, int(g.get('order', g.get('seq', 0)) or 0), int(g.get('seq', 0)))
+            return (1, float(g['rect'].left()), int(g.get('seq', 0)))
+        groups.sort(key=_group_sort_key)
+        gap = 48.0
+        cursor = float(groups[0]['rect'].right()) + gap
+        # Align direct layout groups on a shared vertical centerline.  This keeps
+        # zones, unzoned nodes, and nested expanded subgraphs visually centered
+        # at every inline level after expand/collapse, while preserving each
+        # group's internal relative positions.
+        try:
+            lane_center_y = sorted(float(g['rect'].center().y()) for g in groups)[len(groups) // 2]
+        except Exception:
+            lane_center_y = float(groups[0]['rect'].center().y())
+        changed = False
+        previous_undo = bool(getattr(self.scene, '_suspend_undo', False))
+        self.scene._suspend_undo = True
+        self._inline_scope_group_compact_active = True
+        try:
+            # Center-align the first group too, but keep its x-position as the
+            # anchor for this scope so nested layouts do not drift left/right on
+            # repeated refreshes.
+            first_group = groups[0]
+            first_rect = QtCore.QRectF(first_group['rect'])
+            first_dy = float(lane_center_y) - float(first_rect.center().y())
+            if abs(first_dy) > 1.0:
+                delta = QtCore.QPointF(0.0, first_dy)
+                kind = first_group.get('kind')
+                if kind == 'zone':
+                    move_zone_item(first_group.get('zitem'), delta)
+                    for node in list(first_group.get('nodes', []) or []):
+                        move_node(node, delta)
+                    for nid in list(first_group.get('nested_ids', []) or []):
+                        self._translate_inline_expansion(str(nid), 0.0, float(first_dy), move_container=False)
+                elif kind == 'node':
+                    move_node(first_group.get('node'), delta)
+                elif kind == 'nested':
+                    self._translate_inline_expansion(str(first_group.get('nested_id')), 0.0, float(first_dy), move_container=False)
+                first_rect.translate(delta)
+                first_group['rect'] = first_rect
+                changed = True
+
+            for group in groups[1:]:
+                rect = QtCore.QRectF(group['rect'])
+                dx = cursor - float(rect.left())
+                dy = float(lane_center_y) - float(rect.center().y())
+                # Pack groups to the cursor and align their vertical centers.
+                # The prior implementation only moved groups horizontally to
+                # reclaim excessive gaps.  Nested inline expansion benefits from
+                # treating each direct zone/node/nested boundary as a complete
+                # group on a common lane so expansion/collapse yields a clean,
+                # centered layout at every depth.
+                if abs(dx) > 1.0 or abs(dy) > 1.0:
+                    delta = QtCore.QPointF(dx, dy)
+                    kind = group.get('kind')
+                    if kind == 'zone':
+                        move_zone_item(group.get('zitem'), delta)
+                        for node in list(group.get('nodes', []) or []):
+                            move_node(node, delta)
+                        for nid in list(group.get('nested_ids', []) or []):
+                            try:
+                                self._translate_inline_expansion(str(nid), float(dx), float(dy), move_container=False)
+                            except Exception:
+                                nb = ((getattr(self, '_inline_subgraph_expansions', {}) or {}).get(str(nid)) or {}).get('boundary')
+                                try:
+                                    if nb is not None:
+                                        r = QtCore.QRectF(getattr(nb, '_rect', QtCore.QRectF()))
+                                        nb.set_rect(r.translated(delta))
+                                except Exception:
+                                    pass
+                    elif kind == 'node':
+                        move_node(group.get('node'), delta)
+                    elif kind == 'nested':
+                        try:
+                            self._translate_inline_expansion(str(group.get('nested_id')), float(dx), float(dy), move_container=False)
+                        except Exception:
+                            pass
+                    rect.translate(delta)
+                    group['rect'] = rect
+                    changed = True
+                cursor = max(cursor, float(group['rect'].right()) + gap)
+        finally:
+            self._inline_scope_group_compact_active = False
+            self.scene._suspend_undo = previous_undo
+
+        if changed:
+            try:
+                for citem in list(expansion.get('connections', []) or []):
+                    try:
+                        citem.update_path(); citem.sync_pin_items()
+                    except RuntimeError:
+                        continue
+                self._refresh_inline_projection_connections()
+            except Exception:
+                pass
+        return changed
+
+    def _create_inline_zone_boundaries(self, container_id, node_item, subgraph, anchor, source_min_x, source_min_y, created_nodes):
+        """Create visual-only zone boundaries inside an inline child graph.
+
+        These items are intentionally not registered in self._zone_boundaries.
+        They are scoped visuals for the child graph so the parent graph's zone
+        layout code cannot resize or move them as if they were top-level zones.
+        """
+        zones = self._inline_zone_definitions_for_container(node_item, subgraph=subgraph)
+        if not zones:
+            return []
+        by_zone = {}
+        for node in list(created_nodes or []):
+            try:
+                props = getattr(getattr(node, 'node_data', None), 'properties', {}) or {}
+                zid = props.get('__zone_id') if isinstance(props, dict) else None
+                if zid:
+                    by_zone.setdefault(str(zid), []).append(node)
+            except Exception:
+                continue
+        items = []
+        for idx, zone in enumerate(zones):
+            zid = str(getattr(zone, 'zone_id', '') or '')
+            if not zid:
+                continue
+            rect = self._fit_rect_for_items(by_zone.get(zid, []), min_w=300.0, min_h=185.0)
+            if rect.isNull() or not rect.isValid():
+                try:
+                    base = self._default_zone_rect(idx)
+                    rect = QtCore.QRectF(
+                        float(anchor.x()) + (base.left() - float(source_min_x)),
+                        float(anchor.y()) + (base.top() - float(source_min_y)),
+                        base.width(),
+                        base.height(),
+                    )
+                except Exception:
+                    rect = QtCore.QRectF(float(anchor.x()), float(anchor.y()), 420.0, 260.0)
+            try:
+                title = getattr(zone, 'title', None) or getattr(zone, 'name', None) or zid
+                zitem = ZoneBoundaryItem(self, f"{container_id}:{zid}", rect, title=title, ports_enabled=False)
+                zitem._inline_subgraph_display = True
+                zitem._inline_subgraph_parent_id = container_id
+                # Preserve manifest zone order for inline-expanded child graphs.
+                # These visual-only zones are not registered with the top-level
+                # zone manager, so their ordering must be carried on the item
+                # itself and consumed by inline layout/compaction.
+                zitem._inline_zone_order = int(idx)
+                zitem.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+                zitem.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, False)
+                zitem.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, False)
+                zitem.setZValue(-7)
+                self.scene.addItem(zitem)
+                items.append(zitem)
+            except Exception:
+                continue
+        return items
 
     def expand_subgraph_node(self, node_item):
         """Visually expand a sub-graph inline without permanently flattening the model."""
@@ -3248,12 +5375,42 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         hidden_connections = []
         try:
             threshold_x = node_item.sceneBoundingRect().right() + 20.0
+            parent_inline_scope = getattr(node_item, '_inline_subgraph_parent_id', None)
             for item in list(self.scene.items()):
-                if isinstance(item, NodeItem) and item is not node_item and not getattr(item, '_inline_subgraph_display', False):
+                if not isinstance(item, NodeItem) or item is node_item:
+                    continue
+                # Top-level expansion shifts only top-level, non-zone nodes.
+                # Nested expansion shifts sibling nodes in the same inline child
+                # graph scope, including nodes that belong to child zones in
+                # that scope.  Without this, a nested expansion can be drawn on
+                # top of sibling child zones and leave broken projection wires.
+                if parent_inline_scope:
+                    if getattr(item, '_inline_subgraph_parent_id', None) != parent_inline_scope:
+                        continue
+                else:
+                    if getattr(item, '_inline_subgraph_display', False):
+                        continue
+                    if getattr(item, '_zone_id', None):
+                        continue
+                try:
                     if item.scenePos().x() > threshold_x:
                         shifted_positions[item.node_data.node_id] = QtCore.QPointF(item.pos())
                         item.setPos(item.pos() + QtCore.QPointF(shift_amount, 0.0))
-            shifted_inline_expansions = self._shift_inline_expansions_after_x(threshold_x, shift_amount, skip_container_id=container_id)
+                except RuntimeError:
+                    continue
+            # When expanding inside an inline child graph, the sibling zone
+            # frames in that same scope must move with their contained sibling
+            # nodes.  Otherwise the nodes shift but the visual zones stay behind,
+            # then the next compact pass grows huge frames to cover both old and
+            # new positions.
+            if parent_inline_scope:
+                for scope_item in self._inline_scope_boundary_items(parent_inline_scope):
+                    try:
+                        if self._layout_rect_for_item(scope_item).left() > float(threshold_x):
+                            self._translate_boundary_rect_item(scope_item, QtCore.QPointF(shift_amount, 0.0))
+                    except RuntimeError:
+                        continue
+            shifted_inline_expansions = self._shift_inline_expansions_after_x(threshold_x, shift_amount, skip_container_id=container_id, parent_scope=parent_inline_scope)
             remap = {}
             for entry in inner_nodes:
                 clone = json.loads(json.dumps(entry))
@@ -3262,9 +5419,22 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 data["node_id"] = self._new_node_id(old_id, remap)
                 data["x"] = anchor.x() + (float(data.get("x", 0.0)) - min_x)
                 data["y"] = anchor.y() + (float(data.get("y", 0.0)) - min_y)
-                data.setdefault("properties", {})["__inline_subgraph_parent"] = container_id
-                data.setdefault("properties", {})["__inline_original_node_id"] = old_id
-                item = self.scene.add_node_from_entry(clone, select_new=False)
+                props = data.setdefault("properties", {})
+                # Preserve child-graph zone membership in the projected inline
+                # node. _mark_inline_node_editable clears the runtime _zone_id
+                # so the parent graph will not adopt it, but the persisted
+                # __zone_id must survive collapse/open-direct cycles.
+                props["__inline_subgraph_parent"] = container_id
+                props["__inline_original_node_id"] = old_id
+                previous_zone_refresh_suspend = bool(getattr(self, '_suspend_zone_membership_refresh', False))
+                previous_zone_layout_suspend = bool(getattr(self, '_suspend_zone_layout', False))
+                self._suspend_zone_membership_refresh = True
+                self._suspend_zone_layout = True
+                try:
+                    item = self.scene.add_node_from_entry(clone, select_new=False)
+                finally:
+                    self._suspend_zone_membership_refresh = previous_zone_refresh_suspend
+                    self._suspend_zone_layout = previous_zone_layout_suspend
                 if item is not None:
                     self._mark_inline_node_editable(item, container_id=container_id, original_node_id=old_id)
                     item.setOpacity(0.96)
@@ -3318,22 +5488,33 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             finally:
                 self.scene._allow_inline_preview_connections = previous_inline_preview_flag
             for conn in list(self.scene.items()):
-                if isinstance(conn, ConnectionItem) and not getattr(conn, '_inline_subgraph_display', False):
-                    data = conn.to_dict()
-                    if data and (data.get("source_node_id") == container_id or data.get("target_node_id") == container_id):
-                        conn.setVisible(False)
-                        hidden_connections.append(conn)
+                if not isinstance(conn, ConnectionItem):
+                    continue
+                data = conn.to_dict()
+                if not data or not (data.get("source_node_id") == container_id or data.get("target_node_id") == container_id):
+                    continue
+                # Top-level expansion hides top-level model wires.  Nested
+                # expansion must also hide the editable inline wires connected
+                # to the hidden child container; otherwise those wires terminate
+                # at the old hidden node and appear as broken dangling stubs.
+                if getattr(conn, '_inline_subgraph_display', False):
+                    if not parent_inline_scope or getattr(conn, '_inline_subgraph_parent_id', None) != parent_inline_scope:
+                        continue
+                conn.setVisible(False)
+                hidden_connections.append(conn)
             # The expanded dashed boundary visually replaces the container. The
             # container remains in the model so save/load and collapse semantics
             # stay stable, but it is hidden while the inline expansion is open.
             node_item.setVisible(False)
             node_rect = QtCore.QRectF()
             for item in created_nodes:
-                node_rect = item.sceneBoundingRect() if node_rect.isNull() else node_rect.united(item.sceneBoundingRect())
+                br = self._layout_rect_for_item(item)
+                node_rect = br if node_rect.isNull() else node_rect.united(br)
             boundary_title = getattr(node_item, 'title', None) or node_item.node_data.title or 'Sub-Graph'
             boundary = InlineSubgraphBoundaryItem(self, container_id, node_rect.adjusted(-35, -62, 45, 45), title=boundary_title)
             boundary._inline_subgraph_display = True
             self.scene.addItem(boundary)
+            inline_zone_boundaries = self._create_inline_zone_boundaries(container_id, node_item, subgraph, anchor, min_x, min_y, created_nodes)
             entry_interface_names = []
             for name in container_input_names:
                 text = str(name or '').strip()
@@ -3369,6 +5550,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                 "entry_targets": entry_targets,
                 "exit_sources": exit_sources,
                 "boundary": boundary,
+                "inline_zone_boundaries": list(inline_zone_boundaries),
                 "shifted_positions": shifted_positions,
                 "hidden_connections": hidden_connections,
                 "container_node": node_item,
@@ -3392,10 +5574,21 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     if item not in combined:
                         combined.append(item)
                 expansion_ref["connections"] = combined
+            self._hide_real_connections_for_expanded_containers()
+            self._refresh_inline_projection_connections()
+            # Run a full scoped cascade after the preview wires exist so every
+            # ancestor boundary/zone sizes from the final projected geometry,
+            # not from the temporary pre-interface layout.
+            self._refresh_inline_layout_tree()
             self._refresh_inline_projection_connections()
         finally:
             self.scene._suspend_undo = False
         self.scene.clearSelection()
+        # Recompact all top-level zones after the inline projection has settled.
+        # This clears stale wide/tall zone bounds from previous expand/collapse
+        # cycles without letting child-scope inline nodes be counted as main-zone
+        # content.
+        self.refresh_all_zone_bounds()
         if not getattr(self, '_rebuilding_inline_expansions', False):
             self._reframe_visible_graph_after_layout_change()
             self._status_message("Expanded sub-graph inline", 3500)
@@ -3439,6 +5632,10 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         subgraph = props.get('subgraph')
         if not isinstance(subgraph, dict):
             return False
+        try:
+            self._linearize_inline_zone_nodes(container_id)
+        except Exception:
+            pass
         subgraph = self._ensure_graph_control_flow_nodes(subgraph)
         start_entries, end_entries = self._find_graph_boundary_entries(subgraph)
         boundary_ids = set()
@@ -3499,22 +5696,117 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         props['subgraph'] = subgraph
         return True
 
-    def collapse_inline_subgraph(self, container_node_id):
-        self._sync_inline_expansion_to_subgraph(container_node_id)
-        expansion = self._inline_subgraph_expansions.pop(container_node_id, None)
-        if not expansion:
+    def _inline_expansion_descendant_ids(self, container_node_id):
+        """Return all active inline expansions nested below ``container_node_id``.
+
+        Inline expansions are a tree, not a flat list.  Collapsing one node must
+        remove only that node and its descendants.  The previous collapse path
+        removed the requested expansion, then rebuilt every remaining expansion
+        from the top-level base snapshot.  That was safe for one level, but once
+        nested expansions existed it could rebuild siblings/ancestors from stale
+        anchors and leave giant zones, stray wires, or orphaned child scopes.
+        """
+        root = str(container_node_id or '')
+        expansions = getattr(self, '_inline_subgraph_expansions', {}) or {}
+        descendants = []
+        for cid in list(expansions.keys()):
+            if str(cid) == root:
+                continue
+            cur = str(cid)
+            seen = set()
+            for _ in range(64):
+                parent = self._inline_expansion_parent_id(cur)
+                if not parent or parent in seen:
+                    break
+                if str(parent) == root:
+                    descendants.append(str(cid))
+                    break
+                seen.add(str(parent))
+                cur = str(parent)
+        descendants.sort(key=lambda cid: self._inline_expansion_depth(cid), reverse=True)
+        return descendants
+
+    def refresh_inline_after_manual_node_drag(self, container_id):
+        """Refresh inline bounds after a user drag without auto-repacking nodes.
+
+        Expand/collapse should compact and center-align lanes, but a direct node
+        drag is an intentional manual edit.  Reusing the full layout transaction
+        during or immediately after that drag caused the node to appear stuck,
+        moved the viewport/scene rect unexpectedly, and could pull nodes out of
+        their inline child zone.  This pass only recomputes the affected zone and
+        ancestor boundaries around the user's final positions.
+        """
+        if not container_id:
             return False
+        previous_linearize = bool(getattr(self, '_suspend_inline_zone_linearize', False))
+        previous_compact = bool(getattr(self, '_suspend_inline_scope_compaction', False))
+        try:
+            self._suspend_inline_zone_linearize = True
+            self._suspend_inline_scope_compaction = True
+            return bool(self._refresh_inline_expansion_bounds(str(container_id)))
+        finally:
+            self._suspend_inline_zone_linearize = previous_linearize
+            self._suspend_inline_scope_compaction = previous_compact
+
+    def collapse_inline_subgraph(self, container_node_id):
+        container_node_id = str(container_node_id or '')
+        expansions = getattr(self, '_inline_subgraph_expansions', {}) or {}
+        if container_node_id not in expansions:
+            return False
+
+        # Persist the collapsing scope and any nested child scopes first, deepest
+        # first, so direct-opened subgraphs preserve the latest inline layout.
+        collapse_ids = self._inline_expansion_descendant_ids(container_node_id) + [container_node_id]
+        for cid in list(collapse_ids):
+            try:
+                self._linearize_inline_zone_nodes(cid)
+                self._refresh_inline_zone_boundaries(cid)
+            except Exception:
+                pass
+            self._sync_inline_expansion_to_subgraph(cid)
+
+        try:
+            self._remove_inline_scope_connection_items(collapse_ids)
+        except Exception:
+            pass
+
         self.scene._suspend_undo = True
         try:
-            self._remove_inline_expansion_visuals(expansion, show_container=True, show_connections=True)
-            remaining_ids = list((getattr(self, '_inline_subgraph_expansions', {}) or {}).keys())
-            if remaining_ids:
-                self._rebuild_inline_expansions_from_base(remaining_ids)
-            else:
+            # Remove descendants first.  When a descendant is removed because its
+            # parent is collapsing, do not resurrect that descendant's hidden
+            # container or hidden wires; the parent cleanup will remove the whole
+            # child-scope projection immediately afterward.
+            for cid in collapse_ids:
+                expansion = self._inline_subgraph_expansions.pop(cid, None)
+                if not expansion:
+                    continue
+                is_root = (cid == container_node_id)
+                self._remove_inline_expansion_visuals(
+                    expansion,
+                    show_container=is_root,
+                    show_connections=is_root,
+                )
+
+            # Do not rebuild unrelated remaining expansions from the base
+            # snapshot.  Remaining expansions are already live scene objects and
+            # should keep their current anchors.  Rebuilding them was the source
+            # of the post-collapse graph explosion with nested scopes.
+            if not self._inline_subgraph_expansions:
                 self._restore_inline_base_positions()
                 self._inline_base_positions = {}
+            else:
+                self._hide_real_connections_for_expanded_containers()
+                self._refresh_inline_projection_connections()
+                self._refresh_inline_layout_tree()
+                self._refresh_inline_projection_connections()
         finally:
             self.scene._suspend_undo = False
+
+        self._sweep_stale_inline_projection_wires()
+        self.refresh_all_zone_bounds()
+        if getattr(self, '_inline_subgraph_expansions', None):
+            self._refresh_inline_layout_tree()
+            self._refresh_inline_projection_connections()
         self._reframe_visible_graph_after_layout_change()
         self._status_message("Collapsed inline sub-graph", 2500)
         return True
@@ -3547,12 +5839,15 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         self._viewHeaderStateBadge.setText(state_text)
         in_subgraph = bool(getattr(self, '_graph_context_stack', []))
         if hasattr(self, '_subgraphBackButton'):
-            self._subgraphBackButton.setVisible(in_subgraph)
-        if hasattr(self, '_subgraphPathLabel'):
-            self._subgraphPathLabel.setVisible(in_subgraph)
-            self._subgraphPathLabel.setText(self._current_subgraph_path() if in_subgraph else "")
-        if in_subgraph:
-            self._viewHeaderDescriptionLabel.setText("Editing nested sub-graph. Start maps to the container Exec In; End maps back to the container Exec Out.")
+            self._subgraphBackButton.hide()
+        if hasattr(self, '_refresh_subgraph_breadcrumb'):
+            self._refresh_subgraph_breadcrumb()
+        if hasattr(self, '_viewHeaderDescriptionLabel'):
+            self._viewHeaderDescriptionLabel.hide()
+        if hasattr(self, '_viewHeaderStateBadge'):
+            self._viewHeaderStateBadge.hide()
+        if hasattr(self, '_viewHeaderLabel'):
+            self._viewHeaderLabel.hide()
         if hasattr(self, '_viewHeaderNameBadge'):
             self._repolish_widget(self._viewHeaderNameBadge)
         self._repolish_widget(self._viewHeaderStateBadge)
@@ -3674,6 +5969,31 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             border: 1px solid rgba(255, 255, 255, 0.12);
             color: rgb(225, 225, 225);
         }
+        QFrame#nodeSubgraphBreadcrumbFrame {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            padding: 2px 6px;
+        }
+        QToolButton#nodeSubgraphBreadcrumbButton {
+            color: rgb(210, 226, 255);
+            border: none;
+            padding: 3px 6px;
+            font-weight: 600;
+        }
+        QToolButton#nodeSubgraphBreadcrumbButton:hover {
+            background: rgba(42, 116, 255, 0.20);
+            border-radius: 7px;
+        }
+        QToolButton#nodeSubgraphBreadcrumbButton[currentScope="true"] {
+            color: rgb(255, 255, 255);
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 7px;
+        }
+        QLabel#nodeSubgraphBreadcrumbSeparator {
+            color: rgba(230, 230, 230, 0.55);
+            padding: 0 1px;
+        }
         """)
 
     def _registry_for_view_id(self, view_id):
@@ -3760,6 +6080,29 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     counts[node_type] = counts.get(node_type, 0) + 1
         return counts
 
+    def _graph_node_type_counts_for_inline_zone(self, scope_id, zone_id):
+        counts = {}
+        if not scope_id or not zone_id:
+            return counts
+        for item in list(self.scene.items()):
+            try:
+                if not isinstance(item, NodeItem):
+                    continue
+                if getattr(item, '_inline_subgraph_parent_id', None) != scope_id:
+                    continue
+                if getattr(item, '_inline_boundary_interface', False):
+                    continue
+                if self._is_hidden_expanded_container_proxy(item):
+                    continue
+                if self._inline_node_zone_id(item) != str(zone_id):
+                    continue
+                node_type = getattr(item.node_data, 'node_type', None)
+                if node_type:
+                    counts[node_type] = counts.get(node_type, 0) + 1
+            except RuntimeError:
+                continue
+        return counts
+
     def _total_graph_node_count(self, graph_data=None):
         if graph_data is None:
             return len([item for item in self.scene.items() if isinstance(item, NodeItem)])
@@ -3826,6 +6169,18 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
                     self._status_message("Node type is not available in this expanded sub-graph scope.", 4000)
                 return False
             rules = view_definition.rules if view_definition is not None and getattr(view_definition, 'rules', None) is not None else NodeViewRules()
+        elif raw_scope_id and scope_kind == 'inline_zone':
+            try:
+                inline_container, inline_zone = raw_scope_id
+            except Exception:
+                inline_container, inline_zone = (None, None)
+            zone = self._inline_zone_definition(inline_container, inline_zone) if inline_container and inline_zone else None
+            registry = self._inline_zone_registry(inline_container, inline_zone) if inline_container and inline_zone else self.active_node_registry()
+            if not self._node_type_allowed_in_registry(node_type, registry=registry):
+                if show_feedback:
+                    self._status_message("Node type is not available in this expanded sub-graph zone.", 4000)
+                return False
+            rules = getattr(zone, 'rules', None) or NodeViewRules()
         elif raw_scope_id and scope_kind == 'zone':
             zone = self._zone_definition(raw_scope_id) if hasattr(self, '_zone_definition') else None
             registry = self._zone_registry(raw_scope_id) if hasattr(self, '_zone_registry') else self.active_node_registry()
@@ -3844,6 +6199,12 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             counts = dict(counts_override)
         elif raw_scope_id and scope_kind == 'inline':
             counts = self._graph_node_type_counts_for_inline_scope(raw_scope_id)
+        elif raw_scope_id and scope_kind == 'inline_zone':
+            try:
+                inline_container, inline_zone = raw_scope_id
+            except Exception:
+                inline_container, inline_zone = (None, None)
+            counts = self._graph_node_type_counts_for_inline_zone(inline_container, inline_zone) if inline_container and inline_zone and hasattr(self, '_graph_node_type_counts_for_inline_zone') else {}
         elif raw_scope_id and scope_kind == 'zone':
             counts = self._graph_node_type_counts_for_zone(raw_scope_id) if hasattr(self, '_graph_node_type_counts_for_zone') else {}
         else:
@@ -4623,9 +6984,11 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         else:
             self.dockProperties.setMinimumWidth(40)
             self.dockProperties.setMaximumWidth(16777215)
-        if self.dockProperties.isVisible():
-            self.resizeDocks([self.dockProperties], [target_width], QtCore.Qt.Horizontal)
-        else:
+        # Do not call resizeDocks here.  Re-applying dock sizes during selection
+        # changes can make the graph editor export a large effective minimum
+        # size to the workspace splitter.  The temporary min/max lock above is
+        # enough to prevent property-panel jitter during the rebuild.
+        if not self.dockProperties.isVisible():
             self.dockProperties.resize(px(target_width), px(self.dockProperties.height()))
 
     def _stabilize_properties_dock_width(self, previous_width=None):
@@ -4643,7 +7006,9 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         if not self.dockProperties.isVisible():
             self.dockProperties.resize(px(target_width), px(self.dockProperties.height()))
             return
-        self.resizeDocks([self.dockProperties], [target_width], QtCore.Qt.Horizontal)
+        # Avoid forcing dock geometry on every selection/property refresh.
+        # User-driven dock splitter movement should remain the source of truth.
+        return
 
     def _clear_form_layout(self, form_layout):
         while form_layout.count():
@@ -5628,7 +7993,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
 
     def _install_definition_live_reload(self):
         watch_roots = []
-        for root in (NODE_DEFINITIONS_DIR, NODE_VIEW_MANIFESTS_DIR):
+        for root in [NODE_DEFINITIONS_DIR] + list(iter_node_view_manifest_dirs()):
             try:
                 resolved = str(Path(root).resolve())
             except Exception:
@@ -5668,6 +8033,21 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         watcher = self._definition_watcher
         if watcher is None:
             return
+        # Plugin/project view-manifest directories can be registered after the
+        # editor is constructed.  Rebuild roots here so live edits to those
+        # manifests refresh zone palettes immediately.
+        try:
+            watch_roots = []
+            for root in [NODE_DEFINITIONS_DIR] + list(iter_node_view_manifest_dirs()):
+                try:
+                    resolved = str(Path(root).resolve())
+                except Exception:
+                    resolved = str(root)
+                if resolved not in watch_roots:
+                    watch_roots.append(resolved)
+            self._definition_watch_roots = watch_roots
+        except Exception:
+            pass
         desired = list(self._iter_definition_watch_paths())
         current = set(watcher.files()) | set(watcher.directories())
         desired_set = set(desired)
@@ -5696,6 +8076,14 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             self._active_node_view_id = active_view_id if fallback_view_id is None else fallback_view_id
             self._node_view_session.set_active_view_id(self._active_node_view_id)
             self._apply_active_node_view_registry()
+            # View-manifest edits can change zone membership lists without
+            # changing graph data.  Rebuild zone boundary items and reflow their
+            # current members so right-click palettes and sizing use the latest
+            # manifest immediately after live reload.
+            if hasattr(self, '_refresh_zones'):
+                self._refresh_zones()
+            if hasattr(self, 'refresh_all_zone_bounds'):
+                self.refresh_all_zone_bounds()
             self._refresh_node_view_ui()
             self._refresh_definition_watch_paths()
             if hasattr(self, 'graphView') and self.graphView is not None:
@@ -7504,33 +9892,26 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
             window.statusbar.showMessage(message, timeout)
 
     def _current_context_file_path(self):
-        """Return the file path owned by the active graph context.
+        """Return the file path that owns the active editing scope.
 
-        The root graph owns ``self.current_file_path``. A sub-graph view is a
-        separate save context: saving from inside an embedded sub-graph must
-        serialize that sub-graph as a standalone graph file, not the parent
-        root graph. Linked/reference-only contexts use their linked path as the
-        context file path.
+        File Save is document-owned, not scope-owned.  Embedded sub-graphs are
+        edited through their own graph view, but they remain serialized inside
+        the root graph document.  Therefore, pressing Save while an embedded
+        sub-graph is active must write ``self.current_file_path``.  Linked
+        reference-only sub-graphs remain independent documents and keep using
+        their linked graph path.
         """
         if not self._graph_context_stack:
             return self.current_file_path or ""
         context = self._graph_context_stack[-1]
-        if context.get("current_file_path"):
-            return context.get("current_file_path") or ""
         if context.get("reference_only"):
-            return context.get("linked_graph_path") or ""
-        return ""
+            return context.get("linked_graph_path") or self.current_file_path or ""
+        return self.current_file_path or ""
 
     def _default_file_name(self):
         context_path = self._current_context_file_path()
         if context_path:
             return context_path
-        if self._graph_context_stack:
-            context = self._graph_context_stack[-1]
-            props = context.get("node_properties") or {}
-            base = str(props.get("graph_name") or context.get("title") or self.editor_title() or "Untitled Graph").strip()
-            base = base or "Untitled Graph"
-            return f"{base}{self.graph_file_extension_for_view_id(self._active_node_view_id)}"
         return self.current_file_path or f"{self.editor_title()}.nexnode"
 
     def save_graph_to_file(self):
@@ -7556,15 +9937,28 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         return self._save_graph_to_path(file_path)
 
     def _save_payload_for_active_context(self):
-        """Serialize the graph currently shown in the editor.
+        """Serialize the document that owns the active graph editing scope.
 
-        This is intentionally different from session/state saving. File Save and
-        Save As must honor the active graph context. If the user is editing a
-        Sequence sub-graph, the file payload must be that Sequence graph only.
+        The visible graph can be a scoped embedded sub-graph, but embedded
+        scopes do not own files.  Save first commits the visible scope back into
+        its parent chain and then returns the root graph payload.  Linked
+        reference-only sub-graphs are independent graph documents and still save
+        their active payload to the linked path.
         """
         if self._graph_context_stack:
-            return self._save_current_graph_context()
+            context = self._graph_context_stack[-1]
+            active_payload = self._save_current_graph_context()
+            if context.get("reference_only"):
+                return active_payload
+            if isinstance(self._root_graph_data, dict):
+                return self._root_graph_data
+            return active_payload
         return self.collapse_all_inline_subgraphs() or self.scene.serialize_graph()
+
+    def _save_view_id_for_graph_payload(self, graph_data):
+        metadata = graph_data.get("metadata") if isinstance(graph_data, dict) else {}
+        view_id = metadata.get("active_node_view_id") if isinstance(metadata, dict) else None
+        return view_id or self._active_node_view_id
 
     def _validate_save_path_for_graph(self, file_path, graph_data):
         metadata = graph_data.get("metadata") if isinstance(graph_data, dict) else {}
@@ -7652,7 +10046,7 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         if not isinstance(graph_data, dict):
             return ['Graph payload is not an object.']
         messages = []
-        if view_id and view_id not in NODE_VIEW_REGISTRY:
+        if view_id and NODE_VIEW_REGISTRY.get(view_id) is None:
             messages.append(f'Unknown graph view id: {view_id}')
             return messages
         if view_id and not self._view_id_allowed_for_tool(view_id):
@@ -7698,11 +10092,12 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
     def _save_graph_to_path(self, file_path):
         graph_data = self._save_payload_for_active_context()
         metadata = graph_data.setdefault("metadata", {})
-        metadata["active_node_view_id"] = self._active_node_view_id
-        metadata["graph_file_extension"] = self.graph_file_extension_for_view_id(self._active_node_view_id)
+        save_view_id = self._save_view_id_for_graph_payload(graph_data)
+        metadata["active_node_view_id"] = save_view_id
+        metadata["graph_file_extension"] = self.graph_file_extension_for_view_id(save_view_id)
         self._write_bookmark_metadata_to_graph(graph_data)
 
-        validation_messages = self._validate_graph_payload_for_view_id(graph_data, self._active_node_view_id)
+        validation_messages = self._validate_graph_payload_for_view_id(graph_data, save_view_id)
         if validation_messages:
             QtWidgets.QMessageBox.warning(self, f'{self.graph_view_label} Validation Failed', '\n'.join(validation_messages))
             return False
@@ -7715,14 +10110,15 @@ class NoDELiteTool(QtWidgets.QMainWindow, NexusSerializable):
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(graph_data, f, indent=2)
-            if self._graph_context_stack:
-                # Do not replace the parent/root graph file path when saving a
-                # sub-graph as its own standalone artifact.
+            if self._graph_context_stack and self._graph_context_stack[-1].get("reference_only"):
                 self._graph_context_stack[-1]["current_file_path"] = file_path
             else:
                 self.current_file_path = file_path
             self.set_editor_title(os.path.splitext(os.path.basename(file_path))[0])
-            self._status_message(f"Saved graph to {file_path}", 5000)
+            if self._graph_context_stack and not self._graph_context_stack[-1].get("reference_only"):
+                self._status_message(f"Saved root graph to {file_path}", 5000)
+            else:
+                self._status_message(f"Saved graph to {file_path}", 5000)
             return True
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Save Failed", f"Could not save graph:\n{exc}")

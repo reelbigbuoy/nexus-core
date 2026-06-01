@@ -392,7 +392,11 @@ class DesignerSurface(NexusFrame):
         self.builder = builder
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
-        self.setMinimumSize(1100, 750)
+        # This surface used to declare the design canvas startup size as a hard
+        # minimum.  When docked into a workspace split view that minimum bubbles
+        # up and can lock splitter handles.  Keep the canvas shrinkable; the
+        # initial/preferred size is handled by normal size hints and layout.
+        self.setMinimumSize(40, 40)
         self._dock_target_uid = None
         self._dock_zone = None
         self.refresh_theme()

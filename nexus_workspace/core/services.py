@@ -87,6 +87,32 @@ class PluginContext:
             return self.context_resolver.publish_active_tool(tool, window=window)
         return None
 
+    @property
+    def global_data(self):
+        """Alias for the Nexus-wide shared DataStore."""
+        return self.data_store
+
+    @property
+    def group_data(self):
+        """DataStore for the currently active tool's tab group, or a no-op store."""
+        tool_id = None
+        try:
+            active = self.current_context('context.active_tool') or {}
+            tool_id = active.get('tool_id')
+        except Exception:
+            tool_id = None
+        return self.group_data_for_tool(tool_id)
+
+    def group_data_for_tool(self, tool_id: str):
+        if self.workspace_manager is None or not hasattr(self.workspace_manager, 'tab_group_manager'):
+            return None
+        return self.workspace_manager.tab_group_manager.get_store_for_tool(tool_id)
+
+    def group_context_for_tool(self, tool_id: str):
+        if self.workspace_manager is None or not hasattr(self.workspace_manager, 'tab_group_manager'):
+            return None
+        return self.workspace_manager.tab_group_manager.get_context_for_tool(tool_id)
+
     def current_context(self, key: str, default=None):
         if self.data_store is None:
             return default
