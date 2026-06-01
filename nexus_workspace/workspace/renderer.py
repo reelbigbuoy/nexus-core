@@ -72,7 +72,11 @@ class WorkspaceRenderer:
             splitter.setChildrenCollapsible(False)
             splitter.setHandleWidth(6)
             for child in node.children:
-                splitter.addWidget(self._build_widget_for_node(area, child, live_pane_ids))
+                child_widget = self._build_widget_for_node(area, child, live_pane_ids)
+                child_widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+                splitter.addWidget(child_widget)
+            for index in range(splitter.count()):
+                splitter.setStretchFactor(index, 1)
             if node.sizes and len(node.sizes) == splitter.count():
                 splitter.setSizes(node.sizes)
             else:
@@ -138,6 +142,7 @@ class WorkspaceRenderer:
         finally:
             pane.tab_widget.blockSignals(False)
 
+        pane.refresh_group_indicators()
         pane.currentToolChanged.emit(pane.current_tool())
         pane.area.activeToolChanged.emit(pane.current_tool())
 

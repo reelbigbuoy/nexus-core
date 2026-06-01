@@ -644,6 +644,18 @@ class InlineSubgraphBoundaryItem(QtWidgets.QGraphicsItem):
         self._drag_group_start_state = None
         self._drag_started = False
 
+    def set_rect(self, rect):
+        """Update the inline subgraph boundary rectangle safely.
+
+        Zone layout code and inline-expansion reflow both need to resize dashed
+        boundaries.  ZoneBoundaryItem already exposes set_rect(); keeping the
+        same small API here prevents mixed boundary handling from crashing when
+        an expanded subgraph lives inside a zone.
+        """
+        self.prepareGeometryChange()
+        self._rect = QtCore.QRectF(rect)
+        self.update()
+
     def boundingRect(self):
         return self._rect.adjusted(-6, -6, 6, 6)
 
@@ -915,7 +927,7 @@ class ZoneBoundaryItem(QtWidgets.QGraphicsItem):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         scene = self.scene()
         theme = scene.theme if scene is not None and hasattr(scene, 'theme') else THEMES['Midnight']
-        border = QtGui.QColor(theme.get('node_selected', '#6aa9ff'))
+        border = QtGui.QColor(theme.get('zone_boundary', theme.get('accent', '#2FA572')))
         fill = QtGui.QColor(theme.get('node_bg', '#20242b'))
         title_fill = QtGui.QColor(theme.get('node_title', '#2c3440'))
         text_color = QtGui.QColor(theme.get('text', '#ffffff'))
@@ -946,6 +958,8 @@ class ZoneBoundaryItem(QtWidgets.QGraphicsItem):
             self._drag_press_scene_pos = QtCore.QPointF(event.scenePos())
             self._drag_start_rect = QtCore.QRectF(self._rect)
             self._drag_started = False
+            self.setSelected(True)
+            event.accept(); return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -1246,7 +1260,7 @@ class NodeItem(QtWidgets.QGraphicsItem):
             self.title
         )
 
-        if self.is_subgraph_container() and not getattr(self, '_inline_subgraph_display', False):
+        if self.is_subgraph_container():
             btn = self._inline_expand_button_rect()
             painter.setPen(QtGui.QPen(text_color, 1.3))
             painter.setBrush(QtGui.QBrush(body_color.lighter(120)))
@@ -1287,7 +1301,6 @@ class NodeItem(QtWidgets.QGraphicsItem):
 
     def mousePressEvent(self, event):
         if (event.button() == QtCore.Qt.LeftButton and self.is_subgraph_container()
-                and not getattr(self, '_inline_subgraph_display', False)
                 and self._inline_expand_button_rect().contains(event.pos())):
             scene = self.scene()
             views = scene.views() if scene is not None else []
@@ -1368,14 +1381,33 @@ class NodeItem(QtWidgets.QGraphicsItem):
 
         # Re-enable grid snapping after the interactive drag is complete. During
         # the drag, the node follows the cursor exactly; on release, it settles
-        # onto the grid without creating a press-time jump.
+        # onto the grid without creating a press-time jump.  Inline-expanded
+        # child nodes intentionally suppress scoped auto-layout while dragging;
+        # collect their scopes so the editor can refresh the affected boundaries
+        # once, after the final position is known, without repacking the node.
+        inline_scopes_to_refresh = set()
         for node in dragged_nodes:
             try:
+                inline_scope = getattr(node, '_inline_subgraph_parent_id', None)
                 node._interactive_drag_active = False
                 if was_dragging:
                     node.setPos(node.pos())
+                    if inline_scope:
+                        inline_scopes_to_refresh.add(str(inline_scope))
             except RuntimeError:
                 pass
+
+        if was_dragging and inline_scopes_to_refresh and scene is not None:
+            try:
+                editor = getattr(scene.views()[0], 'editor', None) if scene.views() else None
+            except Exception:
+                editor = None
+            if editor is not None and hasattr(editor, 'refresh_inline_after_manual_node_drag'):
+                for scope_id in sorted(inline_scopes_to_refresh):
+                    try:
+                        editor.refresh_inline_after_manual_node_drag(scope_id)
+                    except RuntimeError:
+                        pass
 
         moved_nodes = []
         if scene is not None and not getattr(scene, "_suspend_undo", False):

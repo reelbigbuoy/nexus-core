@@ -20,7 +20,7 @@
 # Description: Implements the workspace pane widget that hosts tabbed tools and pane controls.
 #============================================================================
 
-from nexus_workspace.framework.qt import QtCore, QtWidgets
+from nexus_workspace.framework.qt import QtCore, QtGui, QtWidgets
 
 from .drop_overlay import WorkspaceDropOverlay, build_drop_regions
 from .tab_bar import WorkspaceTabBar
@@ -45,6 +45,13 @@ class WorkspacePane(QtWidgets.QFrame):
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.setAcceptDrops(True)
 
+        # Workspace panes are direct children of workspace splitters.  A hosted
+        # plugin may have its own internal minimum sizes, but those minimums
+        # should not make the outer split cell feel locked.  Keep the pane
+        # itself flexible and provide only a small practical minimum hint.
+        self.setMinimumSize(0, 0)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -64,6 +71,14 @@ class WorkspacePane(QtWidgets.QFrame):
         self.overlay = WorkspaceDropOverlay(self)
         self.overlay.setGeometry(self.rect())
         QtWidgets.QApplication.instance().installEventFilter(self)
+
+    def minimumSizeHint(self):
+        # Do not let the active plugin's size hint dominate splitter movement.
+        return QtCore.QSize(120, 80)
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        return QtCore.QSize(max(240, hint.width()), max(160, hint.height()))
 
     def bind_pane_id(self, pane_id):
         self.pane_id = pane_id
@@ -87,6 +102,31 @@ class WorkspacePane(QtWidgets.QFrame):
         if hasattr(window, 'refresh_window_title'):
             window.refresh_window_title()
 
+    def refresh_group_indicators(self):
+        group_manager = getattr(self.manager, 'tab_group_manager', None)
+        if group_manager is None:
+            return
+        for index, tool_id in enumerate(list(self._tool_ids)):
+            group = group_manager.get_group_for_tool(tool_id) if tool_id else None
+            if group is None:
+                self.tab_widget.setTabIcon(index, QtGui.QIcon())
+                self.tab_widget.setTabToolTip(index, self.tab_widget.tabText(index))
+                continue
+            self.tab_widget.setTabIcon(index, self._group_icon(group.color))
+            self.tab_widget.setTabToolTip(index, f"{self.tab_widget.tabText(index)} — Tab Group: {group.label}")
+
+    def _group_icon(self, color_name):
+        pixmap = QtGui.QPixmap(14, 14)
+        pixmap.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        color = QtGui.QColor(color_name or '#4B8DFF')
+        painter.setBrush(color)
+        painter.setPen(QtGui.QPen(color.darker(120), 1))
+        painter.drawRoundedRect(1, 1, 12, 12, 3, 3)
+        painter.end()
+        return QtGui.QIcon(pixmap)
+
     def add_tool(self, tool, title, tool_id=None):
         index = self.tab_widget.addTab(tool, title)
         self._tool_ids.append(tool_id)
@@ -94,6 +134,7 @@ class WorkspacePane(QtWidgets.QFrame):
         self._attach_tool_signals(tool, tool_id)
         self.currentToolChanged.emit(tool)
         self.area.activeToolChanged.emit(tool)
+        self.refresh_group_indicators()
         self._sync_window_title()
         return index
 
@@ -104,6 +145,7 @@ class WorkspacePane(QtWidgets.QFrame):
         self._attach_tool_signals(tool, tool_id)
         self.currentToolChanged.emit(tool)
         self.area.activeToolChanged.emit(tool)
+        self.refresh_group_indicators()
         self._sync_window_title()
         return index
 

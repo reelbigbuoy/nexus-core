@@ -102,6 +102,7 @@ class StateManager(NexusSerializable):
             },
             'session': {
                 'next_tool_number': getattr(workspace_manager, '_next_tool_number', 1),
+                'tab_groups': workspace_manager.tab_group_manager.serialize() if hasattr(workspace_manager, 'tab_group_manager') else [],
                 'windows': windows,
             },
         }

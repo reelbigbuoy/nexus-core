@@ -127,12 +127,18 @@ class NodeViewRegistry:
         if existing is not None:
             existing_source = existing.source_path or "<unknown>"
             new_source = view_definition.source_path or "<unknown>"
+            # Live-reload and plugin-owned manifests must be able to replace an
+            # already-loaded view definition.  The previous behavior returned
+            # the first definition for a view_id, which meant zone edits in a
+            # later manifest could be parsed but never become active.  Since
+            # load_node_views() loads framework manifests first and additional
+            # plugin/project manifests afterward, last writer wins gives the
+            # expected override behavior while still surfacing the duplicate.
             if existing_source != new_source:
                 print(
-                    "[GraphEditor] Skipping duplicate node view '%s' from %s; already provided by %s"
-                    % (view_definition.view_id, new_source, existing_source)
+                    "[GraphEditor] Replacing duplicate node view '%s' from %s with %s"
+                    % (view_definition.view_id, existing_source, new_source)
                 )
-            return existing
         self._views[view_definition.view_id] = view_definition
         return view_definition
 
@@ -245,7 +251,7 @@ class NodeViewLoader:
             label=str(data.get("label") or data.get("name") or data.get("id") or "Zone"),
             order=int(data.get("order", 0) or 0),
             ports_enabled=bool(data.get("ports_enabled", data.get("exec_ports_enabled", data.get("zone_ports_enabled", True)))),
-            include_type_ids=[str(item) for item in list(raw_node_types) if str(item).strip()],
+            include_type_ids=[str(item).strip() for item in list(raw_node_types) if str(item).strip()],
             exclude_type_ids=[str(item) for item in list(data.get("exclude_type_ids", []) or []) if str(item).strip()],
             include_categories=[str(item) for item in list(data.get("include_categories", []) or []) if str(item).strip()],
             exclude_categories=[str(item) for item in list(data.get("exclude_categories", []) or []) if str(item).strip()],
@@ -450,6 +456,26 @@ def register_node_view_manifest_dir(path):
         _ADDITIONAL_NODE_VIEW_MANIFEST_DIRS.append(candidate)
     return candidate
 
+
+
+
+def iter_node_view_manifest_dirs():
+    """Return every directory that may provide node view manifests.
+
+    Used by the graph editor live-reload watcher so edits to plugin/project
+    view manifests refresh zone palettes without requiring a restart.
+    """
+    seen = set()
+    for candidate in [NODE_VIEW_MANIFESTS_DIR] + list(_ADDITIONAL_NODE_VIEW_MANIFEST_DIRS):
+        try:
+            resolved = Path(candidate).resolve()
+        except Exception:
+            resolved = Path(candidate)
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield resolved
 
 def load_node_views(clear_existing=True):
     if clear_existing:

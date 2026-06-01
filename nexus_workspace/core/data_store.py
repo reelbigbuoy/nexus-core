@@ -38,6 +38,10 @@ class DataStore:
         self._values[key] = value
         self._notify(key, value, publish_event=publish_event)
 
+    def publish(self, key: str, value: Any, publish_event: bool = True):
+        """Alias for set(), matching the group/global bus terminology."""
+        self.set(key, value, publish_event=publish_event)
+
     def get(self, key: str, default=None):
         return self._values.get(key, default)
 

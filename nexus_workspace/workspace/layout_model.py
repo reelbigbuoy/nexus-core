@@ -21,7 +21,7 @@
 #============================================================================
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 import uuid
 
 
@@ -93,6 +93,7 @@ class WorkspaceModel:
     def __init__(self):
         self.windows = {}
         self.tools = {}
+        self.tab_groups = {}
 
     def register_window(self, window_id: str, root_node: Optional[LayoutNode] = None, is_primary: bool = False):
         node = WindowNode(window_id=window_id, root_node=root_node or PaneNode(), is_primary=is_primary)

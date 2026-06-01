@@ -96,13 +96,67 @@ class WorkspaceTabBar(QtWidgets.QTabBar):
         if index < 0:
             super().contextMenuEvent(event)
             return
+
+        tool_id = self.pane.tool_id_at(index)
+        group_manager = getattr(self.manager, 'tab_group_manager', None)
+        current_group = group_manager.get_group_for_tool(tool_id) if group_manager is not None and tool_id else None
+
         menu = QtWidgets.QMenu(self)
         act_rename = menu.addAction("Rename Tab")
+        menu.addSeparator()
+        act_create_group = menu.addAction("Create Tab Group")
+        act_remove_group = None
+        act_rename_group = None
+        act_color_group = None
+        move_actions = {}
+
+        groups = list(getattr(getattr(self.manager, 'model', None), 'tab_groups', {}).values())
+        if groups:
+            move_menu = menu.addMenu("Move To Tab Group")
+            for group in groups:
+                action = move_menu.addAction(group.label)
+                action.setEnabled(current_group is None or group.group_id != current_group.group_id)
+                move_actions[action] = group.group_id
+
+        if current_group is not None:
+            menu.addSeparator()
+            act_remove_group = menu.addAction(f"Remove From {current_group.label}")
+            act_rename_group = menu.addAction("Rename Current Group")
+            act_color_group = menu.addAction("Change Current Group Color")
+
         chosen = menu.exec_(event.globalPos())
         if chosen is act_rename:
             self._begin_rename(index)
             event.accept()
             return
+        if chosen is act_create_group and tool_id:
+            label, ok = QtWidgets.QInputDialog.getText(self, "Create Tab Group", "Group name:")
+            if ok:
+                label = label.strip() or None
+                group = self.manager.create_tab_group(label=label, tool_ids=[tool_id])
+                if group is not None:
+                    event.accept()
+                    return
+        if chosen in move_actions and tool_id:
+            self.manager.move_tool_to_tab_group(tool_id, move_actions[chosen])
+            event.accept()
+            return
+        if chosen is act_remove_group and tool_id:
+            self.manager.remove_tool_from_tab_group(tool_id)
+            event.accept()
+            return
+        if chosen is act_rename_group and current_group is not None:
+            label, ok = QtWidgets.QInputDialog.getText(self, "Rename Tab Group", "Group name:", text=current_group.label)
+            if ok and label.strip():
+                self.manager.rename_tab_group(current_group.group_id, label.strip())
+                event.accept()
+                return
+        if chosen is act_color_group and current_group is not None:
+            color = QtWidgets.QColorDialog.getColor(QtGui.QColor(current_group.color), self, "Choose Tab Group Color")
+            if color.isValid():
+                self.manager.change_tab_group_color(current_group.group_id, color.name())
+                event.accept()
+                return
         super().contextMenuEvent(event)
 
     def _begin_rename(self, index):

@@ -499,6 +499,17 @@ class GraphView(QtWidgets.QGraphicsView):
         node_properties = {}
         if scope_kind == 'inline' and scope_id:
             node_properties['__inline_subgraph_parent'] = scope_id
+        elif scope_kind == 'inline_zone' and scope_id:
+            try:
+                inline_container, inline_zone = scope_id
+            except Exception:
+                inline_container, inline_zone = (None, None)
+            if inline_container:
+                node_properties['__inline_subgraph_parent'] = inline_container
+            if inline_zone:
+                node_properties['__zone_id'] = inline_zone
+            if editor is not None and inline_container and inline_zone and hasattr(editor, '_adjust_inline_zone_spawn_pos'):
+                scene_pos = editor._adjust_inline_zone_spawn_pos(inline_container, inline_zone, scene_pos, definition)
         elif scope_kind == 'zone' and scope_id:
             node_properties['__zone_id'] = scope_id
             if editor is not None and hasattr(editor, '_adjust_zone_spawn_pos'):
@@ -519,6 +530,18 @@ class GraphView(QtWidgets.QGraphicsView):
                 node = scene.find_node_by_id(created_node_id) if created_node_id and hasattr(scene, 'find_node_by_id') else None
                 if node is not None and hasattr(editor, '_mark_zone_node'):
                     editor._mark_zone_node(node, scope_id)
+            elif scope_kind == 'inline_zone' and scope_id and editor is not None:
+                node = scene.find_node_by_id(created_node_id) if created_node_id and hasattr(scene, 'find_node_by_id') else None
+                try:
+                    inline_container, inline_zone = scope_id
+                except Exception:
+                    inline_container, inline_zone = (None, None)
+                if node is not None and inline_container and hasattr(editor, '_mark_inline_node_editable'):
+                    editor._mark_inline_node_editable(node, inline_container)
+                    props = getattr(getattr(node, 'node_data', None), 'properties', {}) or {}
+                    if isinstance(props, dict) and inline_zone:
+                        props['__zone_id'] = inline_zone
+                    node._inline_zone_id = inline_zone
         else:
             node = scene.add_node(
                 definition.display_name,
@@ -532,6 +555,20 @@ class GraphView(QtWidgets.QGraphicsView):
         if node_item is not None and scope_id and editor is not None:
             if scope_kind == 'inline' and hasattr(editor, '_mark_inline_node_editable'):
                 editor._mark_inline_node_editable(node_item, scope_id)
+            elif scope_kind == 'inline_zone' and hasattr(editor, '_mark_inline_node_editable'):
+                try:
+                    inline_container, inline_zone = scope_id
+                except Exception:
+                    inline_container, inline_zone = (None, None)
+                if inline_container:
+                    editor._mark_inline_node_editable(node_item, inline_container)
+                try:
+                    props = getattr(getattr(node_item, 'node_data', None), 'properties', {}) or {}
+                    if isinstance(props, dict) and inline_zone:
+                        props['__zone_id'] = inline_zone
+                    node_item._inline_zone_id = inline_zone
+                except Exception:
+                    pass
             elif scope_kind == 'zone' and hasattr(editor, '_mark_zone_node'):
                 editor._mark_zone_node(node_item, scope_id)
         if was_empty_graph:
@@ -553,10 +590,11 @@ class GraphView(QtWidgets.QGraphicsView):
 
         QtCore.QTimer.singleShot(0, _frame)
 
-    def _show_graph_node_palette(self, local_pos, global_pos, title="All Actions for this Graph", filter_fn=None, connect_from_port=None):
+    def _show_graph_node_palette(self, local_pos, global_pos, title="All Actions for this Graph", filter_fn=None, connect_from_port=None, registry=None):
         scene_pos = self.mapToScene(local_pos)
         editor = getattr(self, "editor", None)
-        popup = NodePalettePopup(self, registry=self.node_registry(), title=title, filter_fn=filter_fn, template_service=getattr(editor, 'template_service', None))
+        palette_registry = registry or self.node_registry()
+        popup = NodePalettePopup(self, registry=palette_registry, title=title, filter_fn=filter_fn, template_service=getattr(editor, 'template_service', None))
         popup.show_at(global_pos)
         accepted = popup.exec_() == QtWidgets.QDialog.Accepted
         if accepted:
@@ -728,14 +766,26 @@ class GraphView(QtWidgets.QGraphicsView):
         elif editor is not None and hasattr(editor, '_inline_scope_for_scene_pos'):
             scope_id = editor._inline_scope_for_scene_pos(scene_pos)
             scope_kind = 'inline' if scope_id else None
+        if scope_kind == 'inline_zone' and editor is not None and hasattr(editor, '_node_type_allowed_in_inline_zone'):
+            try:
+                inline_container, inline_zone = scope_id
+            except Exception:
+                inline_container, inline_zone = (None, None)
+            zone = editor._inline_zone_definition(inline_container, inline_zone) if hasattr(editor, '_inline_zone_definition') else None
+            title = 'Actions for Zone: %s' % (getattr(zone, 'label', None) or getattr(zone, 'title', None) or inline_zone)
+            registry = editor._inline_zone_registry(inline_container, inline_zone) if hasattr(editor, '_inline_zone_registry') else None
+            self._show_graph_node_palette(local_pos, global_pos, title=title, filter_fn=lambda definition: editor._node_type_allowed_in_inline_zone(getattr(definition, 'type_id', None), inline_container, inline_zone), registry=registry)
+            return
         if scope_kind == 'inline' and editor is not None and hasattr(editor, '_node_type_allowed_in_scope'):
             title = 'Actions for Expanded Sub-Graph'
-            self._show_graph_node_palette(local_pos, global_pos, title=title, filter_fn=lambda definition: editor._node_type_allowed_in_scope(getattr(definition, 'type_id', None), scope_id))
+            registry = editor._registry_for_inline_scope(scope_id) if hasattr(editor, '_registry_for_inline_scope') else None
+            self._show_graph_node_palette(local_pos, global_pos, title=title, filter_fn=lambda definition: editor._node_type_allowed_in_scope(getattr(definition, 'type_id', None), scope_id), registry=registry)
             return
         if scope_kind == 'zone' and editor is not None and hasattr(editor, '_node_type_allowed_in_zone'):
             zone = editor._zone_definition(scope_id) if hasattr(editor, '_zone_definition') else None
             title = 'Actions for Zone: %s' % (getattr(zone, 'label', scope_id))
-            self._show_graph_node_palette(local_pos, global_pos, title=title, filter_fn=lambda definition: editor._node_type_allowed_in_zone(getattr(definition, 'type_id', None), scope_id))
+            registry = editor._zone_registry(scope_id) if hasattr(editor, '_zone_registry') else None
+            self._show_graph_node_palette(local_pos, global_pos, title=title, filter_fn=lambda definition: editor._node_type_allowed_in_zone(getattr(definition, 'type_id', None), scope_id), registry=registry)
             return
         self._show_graph_node_palette(local_pos, global_pos)
 
@@ -1027,6 +1077,11 @@ class GraphView(QtWidgets.QGraphicsView):
                 event.accept()
                 return
 
+            if was_panning:
+                # Qt may emit a contextMenuEvent after a right-button drag on
+                # some platforms.  A drag-pan should never open the add-node
+                # menu on release; only a stationary right click should.
+                self._suppress_next_context_menu = True
             self._right_pan_candidate = False
             event.accept()
             return

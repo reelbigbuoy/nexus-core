@@ -27,6 +27,7 @@ from nexus_workspace.framework.qt import QtCore, QtWidgets
 from .controller import WorkspaceController
 from .layout_model import PaneNode, SplitNode, WorkspaceModel
 from .renderer import WorkspaceRenderer
+from .tab_groups import TabGroupManager
 
 
 @dataclass
@@ -45,6 +46,7 @@ class WorkspaceManager:
         self.model = WorkspaceModel()
         self.session_manager = None
         self.controller = WorkspaceController(self)
+        self.tab_group_manager = TabGroupManager(self.model)
         self.renderer = WorkspaceRenderer(self)
 
     def register_window(self, window):
@@ -159,6 +161,8 @@ class WorkspaceManager:
     def close_tool_in_pane(self, pane_id, tool_id):
         window = self.model.find_window_for_pane(pane_id)
         ok = self.controller.close_tool(pane_id, tool_id)
+        if ok:
+            self.tab_group_manager.remove_tool(tool_id)
         if ok and window:
             ui_window = self.window_by_id(window.window_id)
             if ui_window:
@@ -168,6 +172,49 @@ class WorkspaceManager:
 
     def update_tool_title(self, tool_id, title):
         self.model.update_tool_title(tool_id, title)
+
+    def create_tab_group(self, label=None, color=None, tool_ids=None):
+        group = self.tab_group_manager.create_group(label=label, color=color)
+        for tool_id in tool_ids or []:
+            self.tab_group_manager.add_tool(group.group_id, tool_id)
+        self.render_all()
+        return group
+
+    def delete_tab_group(self, group_id):
+        ok = self.tab_group_manager.delete_group(group_id)
+        if ok:
+            self.render_all()
+        return ok
+
+    def rename_tab_group(self, group_id, label):
+        ok = self.tab_group_manager.rename_group(group_id, label)
+        if ok:
+            self.render_all()
+        return ok
+
+    def change_tab_group_color(self, group_id, color):
+        ok = self.tab_group_manager.change_color(group_id, color)
+        if ok:
+            self.render_all()
+        return ok
+
+    def add_tool_to_tab_group(self, group_id, tool_id):
+        ok = self.tab_group_manager.add_tool(group_id, tool_id)
+        if ok:
+            self.render_all()
+        return ok
+
+    def remove_tool_from_tab_group(self, tool_id):
+        group_id = self.tab_group_manager.remove_tool(tool_id)
+        if group_id:
+            self.render_all()
+        return group_id
+
+    def move_tool_to_tab_group(self, tool_id, group_id):
+        ok = self.tab_group_manager.move_tool(tool_id, group_id)
+        if ok:
+            self.render_all()
+        return ok
 
     def tools_for_window(self, window_id):
         window = self.model.windows.get(window_id)
@@ -257,6 +304,7 @@ class WorkspaceManager:
         self.model = WorkspaceModel()
         self.session_manager = None
         self.controller.model = self.model
+        self.tab_group_manager.set_model(self.model)
 
     def restore_from_state(self, primary_window, state, state_manager):
         for window in list(self._windows):
@@ -286,6 +334,7 @@ class WorkspaceManager:
             self._restore_window(window, window_state, state_manager)
             window.show()
 
+        self.tab_group_manager.restore(session_state.get('tab_groups', []))
         self.render_all()
 
 
